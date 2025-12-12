@@ -47,6 +47,7 @@ auto_test(conference_peer_nick)
 auto_test(conference_simple)
 auto_test(conference_two)
 auto_test(crypto)
+auto_test(crypto_pq)
 #auto_test(dht)  # Doesn't work with UNITY_BUILD.
 auto_test(dht_nodes_response_api)
 auto_test(encryptsave)
@@ -92,6 +93,7 @@ auto_test(version)
 auto_test(save_compatibility)
 
 target_include_directories(auto_encryptsave_test SYSTEM PRIVATE ${LIBSODIUM_INCLUDE_DIRS})
+target_include_directories(auto_crypto_pq_test SYSTEM PRIVATE ${LIBSODIUM_INCLUDE_DIRS})
 
 if(NON_HERMETIC_TESTS)
   auto_test(bootstrap)
