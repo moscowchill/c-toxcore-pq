@@ -11,6 +11,7 @@
 #include "net_crypto.h"
 
 #include <pthread.h>
+#include <sodium.h>
 #include <string.h>
 
 #include "DHT.h"
@@ -20,6 +21,7 @@
 #include "attributes.h"
 #include "ccompat.h"
 #include "crypto_core.h"
+#include "crypto_core_pq.h"
 #include "list.h"
 #include "logger.h"
 #include "mem.h"
@@ -62,6 +64,15 @@ typedef struct Crypto_Connection {
     uint8_t sessionsecret_key[CRYPTO_SECRET_KEY_SIZE]; /* Our private key for this session. */
     uint8_t peersessionpublic_key[CRYPTO_PUBLIC_KEY_SIZE]; /* The public key of the peer. */
     uint8_t shared_key[CRYPTO_SHARED_KEY_SIZE]; /* The precomputed shared key from encrypt_precompute. */
+
+    /* Post-quantum hybrid fields */
+    bool pq_enabled;                                      /* Whether we're using PQ for this connection */
+    bool peer_pq_capable;                                 /* Whether peer supports PQ */
+    bool session_is_hybrid;                               /* Whether current session uses hybrid crypto */
+    uint8_t mlkem_ciphertext[TOX_MLKEM768_CIPHERTEXTBYTES]; /* ML-KEM ciphertext (initiator stores) */
+    uint8_t mlkem_shared[TOX_MLKEM768_SHAREDSECRETBYTES]; /* ML-KEM shared secret */
+    uint8_t peer_mlkem_public[TOX_MLKEM768_PUBLICKEYBYTES]; /* Peer's ML-KEM public key */
+
     Crypto_Conn_State status; /* See Crypto_Conn_State documentation */
     uint64_t cookie_request_number; /* number used in the cookie request packets for this connection */
     uint8_t dht_public_key[CRYPTO_PUBLIC_KEY_SIZE]; /* The dht public key of the peer */
@@ -150,6 +161,11 @@ struct Net_Crypto {
     uint8_t self_public_key[CRYPTO_PUBLIC_KEY_SIZE];
     uint8_t self_secret_key[CRYPTO_SECRET_KEY_SIZE];
 
+    /* Post-quantum ML-KEM-768 keys */
+    bool pq_enabled;                                        /* Whether PQ is enabled and available */
+    uint8_t self_mlkem_public[TOX_MLKEM768_PUBLICKEYBYTES]; /* Our ML-KEM public key */
+    uint8_t self_mlkem_secret[TOX_MLKEM768_SECRETKEYBYTES]; /* Our ML-KEM secret key */
+
     /* The secret key used for cookies */
     uint8_t secret_symmetric_key[CRYPTO_SYMMETRIC_KEY_SIZE];
 
@@ -202,6 +218,40 @@ static bool crypt_connection_id_is_valid(const Net_Crypto *_Nonnull c, int crypt
 #define COOKIE_REQUEST_LENGTH (uint16_t)(1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE + COOKIE_REQUEST_PLAIN_LENGTH + CRYPTO_MAC_SIZE)
 #define COOKIE_RESPONSE_LENGTH (uint16_t)(1 + CRYPTO_NONCE_SIZE + COOKIE_LENGTH + sizeof(uint64_t) + CRYPTO_MAC_SIZE)
 
+/*******************************************************************************
+ * Post-Quantum Hybrid Packet Constants
+ ******************************************************************************/
+
+/* Hybrid cookie request: [type:1][version:1][x25519:32][mlkem:1184][nonce:24][encrypted:72+16] */
+#define HYBRID_COOKIE_REQUEST_LENGTH (uint16_t)(1 + 1 + CRYPTO_PUBLIC_KEY_SIZE + TOX_MLKEM768_PUBLICKEYBYTES + \
+                                                 CRYPTO_NONCE_SIZE + COOKIE_REQUEST_PLAIN_LENGTH + CRYPTO_MAC_SIZE)
+
+/* Hybrid cookie response: [type:1][version:1][nonce:24][encrypted:(cookie+number+mlkem_pub)] */
+#define HYBRID_COOKIE_RESPONSE_PLAIN_LENGTH (uint16_t)(COOKIE_LENGTH + sizeof(uint64_t) + TOX_MLKEM768_PUBLICKEYBYTES)
+#define HYBRID_COOKIE_RESPONSE_LENGTH (uint16_t)(1 + 1 + CRYPTO_NONCE_SIZE + HYBRID_COOKIE_RESPONSE_PLAIN_LENGTH + CRYPTO_MAC_SIZE)
+
+/* Hybrid handshake: [type:1][version:1][cookie:108][mlkem_ct:1088][nonce:24][encrypted:...] */
+#define HYBRID_HANDSHAKE_PACKET_LENGTH (uint16_t)(1 + 1 + COOKIE_LENGTH + TOX_MLKEM768_CIPHERTEXTBYTES + \
+                                                   CRYPTO_NONCE_SIZE + CRYPTO_NONCE_SIZE + CRYPTO_PUBLIC_KEY_SIZE + \
+                                                   CRYPTO_SHA512_SIZE + COOKIE_LENGTH + CRYPTO_MAC_SIZE)
+
+/**
+ * Check if a packet uses the hybrid PQ format.
+ * Hybrid packets have version byte 0x02 at position 1.
+ *
+ * @param packet Packet data
+ * @param length Packet length
+ * @return true if hybrid format, false otherwise
+ */
+static bool packet_is_hybrid_format(const uint8_t *packet, uint16_t length)
+{
+    if (packet == nullptr || length < 2) {
+        return false;
+    }
+
+    return packet[1] == TOX_CRYPTO_VERSION_HYBRID;
+}
+
 /** @brief Create a cookie request packet and put it in packet.
  *
  * dht_public_key is the dht public key of the other
@@ -233,6 +283,68 @@ static int create_cookie_request(const Net_Crypto *_Nonnull c, uint8_t *_Nonnull
     }
 
     return 1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE + len;
+}
+
+/** @brief Create a hybrid PQ cookie request packet.
+ *
+ * Format: [0x18][0x02][our_x25519_dht_pub:32][our_mlkem_pub:1184][nonce:24][encrypted_plain]
+ *
+ * @param c Net_Crypto instance
+ * @param packet Output buffer (must be HYBRID_COOKIE_REQUEST_LENGTH or bigger)
+ * @param dht_public_key DHT public key of target peer
+ * @param number Cookie request number
+ * @param shared_key Output for shared key used for encryption
+ * @retval -1 on failure
+ * @retval HYBRID_COOKIE_REQUEST_LENGTH on success
+ */
+static int create_cookie_request_hybrid(const Net_Crypto *c, uint8_t *packet,
+                                         const uint8_t *dht_public_key, uint64_t number,
+                                         uint8_t *shared_key)
+{
+    if (!c->pq_enabled) {
+        return -1;
+    }
+
+    uint8_t plain[COOKIE_REQUEST_PLAIN_LENGTH];
+    memcpy(plain, c->self_public_key, CRYPTO_PUBLIC_KEY_SIZE);
+    memzero(plain + CRYPTO_PUBLIC_KEY_SIZE, CRYPTO_PUBLIC_KEY_SIZE);
+    memcpy(plain + (CRYPTO_PUBLIC_KEY_SIZE * 2), &number, sizeof(uint64_t));
+
+    const uint8_t *tmp_shared_key = dht_get_shared_key_sent(c->dht, dht_public_key);
+    memcpy(shared_key, tmp_shared_key, CRYPTO_SHARED_KEY_SIZE);
+
+    uint8_t nonce[CRYPTO_NONCE_SIZE];
+    random_nonce(c->rng, nonce);
+
+    size_t offset = 0;
+
+    /* Packet type */
+    packet[offset++] = NET_PACKET_COOKIE_REQUEST;
+
+    /* Hybrid version marker */
+    packet[offset++] = TOX_CRYPTO_VERSION_HYBRID;
+
+    /* Our X25519 DHT public key */
+    memcpy(packet + offset, dht_get_self_public_key(c->dht), CRYPTO_PUBLIC_KEY_SIZE);
+    offset += CRYPTO_PUBLIC_KEY_SIZE;
+
+    /* Our ML-KEM public key */
+    memcpy(packet + offset, c->self_mlkem_public, TOX_MLKEM768_PUBLICKEYBYTES);
+    offset += TOX_MLKEM768_PUBLICKEYBYTES;
+
+    /* Nonce */
+    memcpy(packet + offset, nonce, CRYPTO_NONCE_SIZE);
+    offset += CRYPTO_NONCE_SIZE;
+
+    /* Encrypted payload */
+    const int len = encrypt_data_symmetric(c->mem, shared_key, nonce, plain, sizeof(plain),
+                                           packet + offset);
+
+    if (len != COOKIE_REQUEST_PLAIN_LENGTH + CRYPTO_MAC_SIZE) {
+        return -1;
+    }
+
+    return HYBRID_COOKIE_REQUEST_LENGTH;
 }
 
 /** @brief Create cookie of length COOKIE_LENGTH from bytes of length COOKIE_DATA_LENGTH using encryption_key
@@ -343,6 +455,117 @@ static int handle_cookie_request(const Net_Crypto *_Nonnull c, uint8_t *_Nonnull
     return 0;
 }
 
+/** @brief Handle a hybrid PQ cookie request packet.
+ *
+ * Format: [0x18][0x02][sender_x25519:32][sender_mlkem:1184][nonce:24][encrypted]
+ *
+ * @param c Net_Crypto instance
+ * @param request_plain Output for decrypted request data
+ * @param shared_key Output for shared key used
+ * @param dht_public_key Output for sender's DHT public key
+ * @param sender_mlkem_public Output for sender's ML-KEM public key
+ * @param packet Input packet data
+ * @param length Packet length
+ * @retval -1 on failure
+ * @retval 0 on success
+ */
+static int handle_cookie_request_hybrid(const Net_Crypto *c, uint8_t *request_plain,
+                                         uint8_t *shared_key, uint8_t *dht_public_key,
+                                         uint8_t *sender_mlkem_public,
+                                         const uint8_t *packet, uint16_t length)
+{
+    if (length != HYBRID_COOKIE_REQUEST_LENGTH) {
+        return -1;
+    }
+
+    /* Skip packet type and version byte */
+    size_t offset = 2;
+
+    /* Extract sender's X25519 DHT public key */
+    memcpy(dht_public_key, packet + offset, CRYPTO_PUBLIC_KEY_SIZE);
+    offset += CRYPTO_PUBLIC_KEY_SIZE;
+
+    /* Extract sender's ML-KEM public key */
+    memcpy(sender_mlkem_public, packet + offset, TOX_MLKEM768_PUBLICKEYBYTES);
+    offset += TOX_MLKEM768_PUBLICKEYBYTES;
+
+    /* Get shared key for decryption */
+    const uint8_t *tmp_shared_key = dht_get_shared_key_sent(c->dht, dht_public_key);
+    memcpy(shared_key, tmp_shared_key, CRYPTO_SHARED_KEY_SIZE);
+
+    /* Decrypt payload */
+    const int len = decrypt_data_symmetric(c->mem, shared_key, packet + offset,
+                                           packet + offset + CRYPTO_NONCE_SIZE,
+                                           COOKIE_REQUEST_PLAIN_LENGTH + CRYPTO_MAC_SIZE,
+                                           request_plain);
+
+    if (len != COOKIE_REQUEST_PLAIN_LENGTH) {
+        return -1;
+    }
+
+    return 0;
+}
+
+/** @brief Create a hybrid PQ cookie response packet.
+ *
+ * Format: [0x19][0x02][nonce:24][encrypted:(cookie + number + our_mlkem_pub)]
+ *
+ * @param c Net_Crypto instance
+ * @param packet Output buffer
+ * @param request_plain Decrypted request payload
+ * @param shared_key Shared key for encryption
+ * @param dht_public_key Sender's DHT public key
+ * @retval -1 on failure
+ * @retval HYBRID_COOKIE_RESPONSE_LENGTH on success
+ */
+static int create_cookie_response_hybrid(const Net_Crypto *c, uint8_t *packet,
+                                          const uint8_t *request_plain,
+                                          const uint8_t *shared_key,
+                                          const uint8_t *dht_public_key)
+{
+    if (!c->pq_enabled) {
+        return -1;
+    }
+
+    /* Create cookie binding real pubkey to DHT pubkey */
+    uint8_t cookie_plain[COOKIE_DATA_LENGTH];
+    memcpy(cookie_plain, request_plain, CRYPTO_PUBLIC_KEY_SIZE);
+    memcpy(cookie_plain + CRYPTO_PUBLIC_KEY_SIZE, dht_public_key, CRYPTO_PUBLIC_KEY_SIZE);
+
+    /* Response plain: cookie + request_number + our_mlkem_public */
+    uint8_t plain[HYBRID_COOKIE_RESPONSE_PLAIN_LENGTH];
+
+    if (create_cookie(c->mem, c->rng, c->mono_time, plain, cookie_plain, c->secret_symmetric_key) != 0) {
+        return -1;
+    }
+
+    /* Copy request number */
+    memcpy(plain + COOKIE_LENGTH, request_plain + COOKIE_DATA_LENGTH, sizeof(uint64_t));
+
+    /* Include our ML-KEM public key so initiator can encapsulate */
+    memcpy(plain + COOKIE_LENGTH + sizeof(uint64_t), c->self_mlkem_public, TOX_MLKEM768_PUBLICKEYBYTES);
+
+    /* Build packet */
+    size_t offset = 0;
+    packet[offset++] = NET_PACKET_COOKIE_RESPONSE;
+    packet[offset++] = TOX_CRYPTO_VERSION_HYBRID;
+
+    /* Nonce */
+    random_nonce(c->rng, packet + offset);
+    const uint8_t *nonce = packet + offset;
+    offset += CRYPTO_NONCE_SIZE;
+
+    /* Encrypt */
+    const int len = encrypt_data_symmetric(c->mem, shared_key, nonce, plain, sizeof(plain),
+                                           packet + offset);
+
+    if (len != HYBRID_COOKIE_RESPONSE_PLAIN_LENGTH + CRYPTO_MAC_SIZE) {
+        return -1;
+    }
+
+    return HYBRID_COOKIE_RESPONSE_LENGTH;
+}
+
 /** Handle the cookie request packet (for raw UDP) */
 static int udp_handle_cookie_request(void *_Nonnull object, const IP_Port *_Nonnull source, const uint8_t *_Nonnull packet, uint16_t length,
                                      void *_Nullable userdata)
@@ -352,6 +575,29 @@ static int udp_handle_cookie_request(void *_Nonnull object, const IP_Port *_Nonn
     uint8_t shared_key[CRYPTO_SHARED_KEY_SIZE];
     uint8_t dht_public_key[CRYPTO_PUBLIC_KEY_SIZE];
 
+    /* Check if this is a hybrid PQ cookie request */
+    if (packet_is_hybrid_format(packet, length) && c->pq_enabled) {
+        uint8_t sender_mlkem_public[TOX_MLKEM768_PUBLICKEYBYTES];
+
+        if (handle_cookie_request_hybrid(c, request_plain, shared_key, dht_public_key,
+                                          sender_mlkem_public, packet, length) != 0) {
+            return 1;
+        }
+
+        uint8_t data[HYBRID_COOKIE_RESPONSE_LENGTH];
+
+        if (create_cookie_response_hybrid(c, data, request_plain, shared_key, dht_public_key) != sizeof(data)) {
+            return 1;
+        }
+
+        if ((uint32_t)sendpacket(c->net, source, data, sizeof(data)) != sizeof(data)) {
+            return 1;
+        }
+
+        return 0;
+    }
+
+    /* Classical cookie request */
     if (handle_cookie_request(c, request_plain, shared_key, dht_public_key, packet, length) != 0) {
         return 1;
     }
@@ -376,6 +622,25 @@ static int tcp_handle_cookie_request(const Net_Crypto *_Nonnull c, int connectio
     uint8_t shared_key[CRYPTO_SHARED_KEY_SIZE];
     uint8_t dht_public_key[CRYPTO_PUBLIC_KEY_SIZE];
 
+    /* Check if this is a hybrid PQ cookie request */
+    if (packet_is_hybrid_format(packet, length) && c->pq_enabled) {
+        uint8_t sender_mlkem_public[TOX_MLKEM768_PUBLICKEYBYTES];
+
+        if (handle_cookie_request_hybrid(c, request_plain, shared_key, dht_public_key,
+                                          sender_mlkem_public, packet, length) != 0) {
+            return -1;
+        }
+
+        uint8_t data[HYBRID_COOKIE_RESPONSE_LENGTH];
+
+        if (create_cookie_response_hybrid(c, data, request_plain, shared_key, dht_public_key) != sizeof(data)) {
+            return -1;
+        }
+
+        return send_packet_tcp_connection(c->tcp_c, connections_number, data, sizeof(data));
+    }
+
+    /* Classical cookie request */
     if (handle_cookie_request(c, request_plain, shared_key, dht_public_key, packet, length) != 0) {
         return -1;
     }
@@ -398,6 +663,29 @@ static int tcp_oob_handle_cookie_request(const Net_Crypto *_Nonnull c, unsigned 
     uint8_t shared_key[CRYPTO_SHARED_KEY_SIZE];
     uint8_t dht_public_key_temp[CRYPTO_PUBLIC_KEY_SIZE];
 
+    /* Check if this is a hybrid PQ cookie request */
+    if (packet_is_hybrid_format(packet, length) && c->pq_enabled) {
+        uint8_t sender_mlkem_public[TOX_MLKEM768_PUBLICKEYBYTES];
+
+        if (handle_cookie_request_hybrid(c, request_plain, shared_key, dht_public_key_temp,
+                                          sender_mlkem_public, packet, length) != 0) {
+            return -1;
+        }
+
+        if (!pk_equal(dht_public_key, dht_public_key_temp)) {
+            return -1;
+        }
+
+        uint8_t data[HYBRID_COOKIE_RESPONSE_LENGTH];
+
+        if (create_cookie_response_hybrid(c, data, request_plain, shared_key, dht_public_key) != sizeof(data)) {
+            return -1;
+        }
+
+        return tcp_send_oob_packet(c->tcp_c, tcp_connections_number, dht_public_key, data, sizeof(data));
+    }
+
+    /* Classical cookie request */
     if (handle_cookie_request(c, request_plain, shared_key, dht_public_key_temp, packet, length) != 0) {
         return -1;
     }
@@ -441,6 +729,49 @@ static int handle_cookie_response(const Memory *_Nonnull mem, uint8_t *_Nonnull 
 
     memcpy(cookie, plain, COOKIE_LENGTH);
     memcpy(number, plain + COOKIE_LENGTH, sizeof(uint64_t));
+    return COOKIE_LENGTH;
+}
+
+/** @brief Handle a hybrid PQ cookie response packet.
+ *
+ * Format: [0x19][0x02][nonce:24][encrypted:(cookie + number + peer_mlkem_pub)]
+ *
+ * @param mem Memory allocator
+ * @param cookie Output cookie
+ * @param number Output request number
+ * @param peer_mlkem_public Output peer's ML-KEM public key
+ * @param packet Input packet
+ * @param length Packet length
+ * @param shared_key Shared key for decryption
+ * @retval -1 on failure
+ * @retval COOKIE_LENGTH on success
+ */
+static int handle_cookie_response_hybrid(const Memory *mem, uint8_t *cookie, uint64_t *number,
+                                          uint8_t *peer_mlkem_public,
+                                          const uint8_t *packet, uint16_t length,
+                                          const uint8_t *shared_key)
+{
+    if (length != HYBRID_COOKIE_RESPONSE_LENGTH) {
+        return -1;
+    }
+
+    /* Skip packet type and version byte */
+    size_t offset = 2;
+
+    /* Decrypt */
+    uint8_t plain[HYBRID_COOKIE_RESPONSE_PLAIN_LENGTH];
+    const int len = decrypt_data_symmetric(mem, shared_key, packet + offset,
+                                           packet + offset + CRYPTO_NONCE_SIZE,
+                                           length - offset - CRYPTO_NONCE_SIZE, plain);
+
+    if (len != sizeof(plain)) {
+        return -1;
+    }
+
+    memcpy(cookie, plain, COOKIE_LENGTH);
+    memcpy(number, plain + COOKIE_LENGTH, sizeof(uint64_t));
+    memcpy(peer_mlkem_public, plain + COOKIE_LENGTH + sizeof(uint64_t), TOX_MLKEM768_PUBLICKEYBYTES);
+
     return COOKIE_LENGTH;
 }
 
@@ -539,6 +870,188 @@ static bool handle_crypto_handshake(const Net_Crypto *_Nonnull c, uint8_t *_Nonn
     memcpy(cookie, plain + CRYPTO_NONCE_SIZE + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_SHA512_SIZE, COOKIE_LENGTH);
     memcpy(peer_real_pk, cookie_plain, CRYPTO_PUBLIC_KEY_SIZE);
     memcpy(dht_public_key, cookie_plain + CRYPTO_PUBLIC_KEY_SIZE, CRYPTO_PUBLIC_KEY_SIZE);
+    return true;
+}
+
+/** @brief Create a hybrid PQ handshake packet.
+ *
+ * Format: [0x1a][0x02][cookie:108][mlkem_ct:1088][nonce:24][encrypted_plain]
+ *
+ * The encrypted plain contains: [recv_nonce:24][session_pk:32][cookie_hash:64][new_cookie:108]
+ *
+ * @param c Net_Crypto instance
+ * @param packet Output buffer
+ * @param cookie Cookie received from peer
+ * @param nonce Our receive nonce
+ * @param session_pk Our session public key
+ * @param peer_real_pk Peer's real public key
+ * @param peer_dht_pubkey Peer's DHT public key
+ * @param peer_mlkem_public Peer's ML-KEM public key
+ * @param mlkem_ciphertext Output for ML-KEM ciphertext (for later decapsulation match)
+ * @param mlkem_shared Output for ML-KEM shared secret
+ * @retval -1 on failure
+ * @retval HYBRID_HANDSHAKE_PACKET_LENGTH on success
+ */
+static int create_crypto_handshake_hybrid(const Net_Crypto *c, uint8_t *packet,
+                                           const uint8_t *cookie, const uint8_t *nonce,
+                                           const uint8_t *session_pk,
+                                           const uint8_t *peer_real_pk,
+                                           const uint8_t *peer_dht_pubkey,
+                                           const uint8_t *peer_mlkem_public,
+                                           uint8_t *mlkem_ciphertext,
+                                           uint8_t *mlkem_shared)
+{
+    if (!c->pq_enabled) {
+        return -1;
+    }
+
+    /* ML-KEM encapsulation to peer's public key */
+    uint8_t ct[TOX_MLKEM768_CIPHERTEXTBYTES];
+    uint8_t ss[TOX_MLKEM768_SHAREDSECRETBYTES];
+
+    if (crypto_kem_mlkem768_enc(ct, ss, peer_mlkem_public) != 0) {
+        return -1;
+    }
+
+    /* Store for caller */
+    memcpy(mlkem_ciphertext, ct, TOX_MLKEM768_CIPHERTEXTBYTES);
+    memcpy(mlkem_shared, ss, TOX_MLKEM768_SHAREDSECRETBYTES);
+
+    /* Build encrypted payload (same as classical) */
+    uint8_t plain[CRYPTO_NONCE_SIZE + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_SHA512_SIZE + COOKIE_LENGTH];
+    memcpy(plain, nonce, CRYPTO_NONCE_SIZE);
+    memcpy(plain + CRYPTO_NONCE_SIZE, session_pk, CRYPTO_PUBLIC_KEY_SIZE);
+    crypto_sha512(plain + CRYPTO_NONCE_SIZE + CRYPTO_PUBLIC_KEY_SIZE, cookie, COOKIE_LENGTH);
+
+    uint8_t cookie_plain[COOKIE_DATA_LENGTH];
+    memcpy(cookie_plain, peer_real_pk, CRYPTO_PUBLIC_KEY_SIZE);
+    memcpy(cookie_plain + CRYPTO_PUBLIC_KEY_SIZE, peer_dht_pubkey, CRYPTO_PUBLIC_KEY_SIZE);
+
+    if (create_cookie(c->mem, c->rng, c->mono_time,
+                      plain + CRYPTO_NONCE_SIZE + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_SHA512_SIZE,
+                      cookie_plain, c->secret_symmetric_key) != 0) {
+        sodium_memzero(ss, sizeof(ss));
+        return -1;
+    }
+
+    /* Build packet */
+    size_t offset = 0;
+
+    /* Packet type */
+    packet[offset++] = NET_PACKET_CRYPTO_HS;
+
+    /* Hybrid version marker */
+    packet[offset++] = TOX_CRYPTO_VERSION_HYBRID;
+
+    /* Cookie from peer */
+    memcpy(packet + offset, cookie, COOKIE_LENGTH);
+    offset += COOKIE_LENGTH;
+
+    /* ML-KEM ciphertext */
+    memcpy(packet + offset, ct, TOX_MLKEM768_CIPHERTEXTBYTES);
+    offset += TOX_MLKEM768_CIPHERTEXTBYTES;
+
+    /* Encryption nonce */
+    random_nonce(c->rng, packet + offset);
+    const uint8_t *enc_nonce = packet + offset;
+    offset += CRYPTO_NONCE_SIZE;
+
+    /* Encrypt payload */
+    const int len = encrypt_data(c->mem, peer_real_pk, c->self_secret_key, enc_nonce,
+                                 plain, sizeof(plain), packet + offset);
+
+    if (len != (int)(sizeof(plain) + CRYPTO_MAC_SIZE)) {
+        sodium_memzero(ss, sizeof(ss));
+        return -1;
+    }
+
+    return HYBRID_HANDSHAKE_PACKET_LENGTH;
+}
+
+/** @brief Handle a hybrid PQ crypto handshake packet.
+ *
+ * Format: [0x1a][0x02][cookie:108][mlkem_ct:1088][nonce:24][encrypted_plain]
+ *
+ * @param c Net_Crypto instance
+ * @param nonce Output for peer's receive nonce
+ * @param session_pk Output for peer's session public key
+ * @param peer_real_pk Output for peer's real public key
+ * @param dht_public_key Output for peer's DHT public key
+ * @param cookie Output for cookie in encrypted payload
+ * @param mlkem_ciphertext Output for ML-KEM ciphertext
+ * @param mlkem_shared Output for ML-KEM shared secret (after decapsulation)
+ * @param packet Input packet
+ * @param length Packet length
+ * @param expected_real_pk Expected peer public key (can be NULL)
+ * @retval false on failure
+ * @retval true on success
+ */
+static bool handle_crypto_handshake_hybrid(const Net_Crypto *c,
+                                            uint8_t *nonce, uint8_t *session_pk,
+                                            uint8_t *peer_real_pk, uint8_t *dht_public_key,
+                                            uint8_t *cookie, uint8_t *mlkem_ciphertext,
+                                            uint8_t *mlkem_shared,
+                                            const uint8_t *packet, uint16_t length,
+                                            const uint8_t *expected_real_pk)
+{
+    if (length != HYBRID_HANDSHAKE_PACKET_LENGTH) {
+        return false;
+    }
+
+    /* Skip packet type and version byte */
+    size_t offset = 2;
+
+    /* Extract and verify cookie */
+    uint8_t cookie_plain[COOKIE_DATA_LENGTH];
+
+    if (open_cookie(c->mem, c->mono_time, cookie_plain, packet + offset, c->secret_symmetric_key) != 0) {
+        return false;
+    }
+
+    if (expected_real_pk != nullptr && !pk_equal(cookie_plain, expected_real_pk)) {
+        return false;
+    }
+
+    uint8_t cookie_hash[CRYPTO_SHA512_SIZE];
+    crypto_sha512(cookie_hash, packet + offset, COOKIE_LENGTH);
+    offset += COOKIE_LENGTH;
+
+    /* Extract ML-KEM ciphertext */
+    const uint8_t *ct = packet + offset;
+    memcpy(mlkem_ciphertext, ct, TOX_MLKEM768_CIPHERTEXTBYTES);
+    offset += TOX_MLKEM768_CIPHERTEXTBYTES;
+
+    /* Decapsulate ML-KEM */
+    if (crypto_kem_mlkem768_dec(mlkem_shared, ct, c->self_mlkem_secret) != 0) {
+        return false;
+    }
+
+    /* Get encryption nonce */
+    const uint8_t *enc_nonce = packet + offset;
+    offset += CRYPTO_NONCE_SIZE;
+
+    /* Decrypt payload */
+    uint8_t plain[CRYPTO_NONCE_SIZE + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_SHA512_SIZE + COOKIE_LENGTH];
+    const int len = decrypt_data(c->mem, cookie_plain, c->self_secret_key, enc_nonce,
+                                 packet + offset, length - offset, plain);
+
+    if (len != (int)sizeof(plain)) {
+        sodium_memzero(mlkem_shared, TOX_MLKEM768_SHAREDSECRETBYTES);
+        return false;
+    }
+
+    /* Verify cookie hash */
+    if (!crypto_sha512_eq(cookie_hash, plain + CRYPTO_NONCE_SIZE + CRYPTO_PUBLIC_KEY_SIZE)) {
+        sodium_memzero(mlkem_shared, TOX_MLKEM768_SHAREDSECRETBYTES);
+        return false;
+    }
+
+    memcpy(nonce, plain, CRYPTO_NONCE_SIZE);
+    memcpy(session_pk, plain + CRYPTO_NONCE_SIZE, CRYPTO_PUBLIC_KEY_SIZE);
+    memcpy(cookie, plain + CRYPTO_NONCE_SIZE + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_SHA512_SIZE, COOKIE_LENGTH);
+    memcpy(peer_real_pk, cookie_plain, CRYPTO_PUBLIC_KEY_SIZE);
+    memcpy(dht_public_key, cookie_plain + CRYPTO_PUBLIC_KEY_SIZE, CRYPTO_PUBLIC_KEY_SIZE);
+
     return true;
 }
 
@@ -1417,6 +1930,43 @@ static int create_send_handshake(const Net_Crypto *_Nonnull c, int crypt_connect
     return 0;
 }
 
+/** @brief Create and send a hybrid PQ handshake packet.
+ *
+ * Performs ML-KEM encapsulation and stores the shared secret for later KDF.
+ *
+ * @retval -1 on failure.
+ * @retval 0 on success.
+ */
+static int create_send_handshake_hybrid(Net_Crypto *_Nonnull c, int crypt_connection_id,
+                                         const uint8_t *_Nonnull cookie,
+                                         const uint8_t *_Nonnull dht_public_key)
+{
+    Crypto_Connection *conn = get_crypto_connection(c, crypt_connection_id);
+
+    if (conn == nullptr || !c->pq_enabled) {
+        return -1;
+    }
+
+    uint8_t handshake_packet[HYBRID_HANDSHAKE_PACKET_LENGTH];
+
+    if (create_crypto_handshake_hybrid(c, handshake_packet, cookie, conn->sent_nonce,
+                                        conn->sessionpublic_key, conn->public_key, dht_public_key,
+                                        conn->peer_mlkem_public,
+                                        conn->mlkem_ciphertext,
+                                        conn->mlkem_shared) != sizeof(handshake_packet)) {
+        return -1;
+    }
+
+    conn->session_is_hybrid = true;
+
+    if (new_temp_packet(c, crypt_connection_id, handshake_packet, sizeof(handshake_packet)) != 0) {
+        return -1;
+    }
+
+    send_temp_packet(c, crypt_connection_id);
+    return 0;
+}
+
 /** @brief Send a kill packet.
  *
  * @retval -1 on failure.
@@ -1593,7 +2143,7 @@ static int handle_data_packet_core(Net_Crypto *_Nonnull c, int crypt_connection_
     return 0;
 }
 
-static int handle_packet_cookie_response(const Net_Crypto *_Nonnull c, int crypt_connection_id, const uint8_t *_Nonnull packet, uint16_t length)
+static int handle_packet_cookie_response(Net_Crypto *_Nonnull c, int crypt_connection_id, const uint8_t *_Nonnull packet, uint16_t length)
 {
     Crypto_Connection *conn = get_crypto_connection(c, crypt_connection_id);
 
@@ -1608,6 +2158,30 @@ static int handle_packet_cookie_response(const Net_Crypto *_Nonnull c, int crypt
     uint8_t cookie[COOKIE_LENGTH];
     uint64_t number;
 
+    /* Check for hybrid cookie response */
+    if (packet_is_hybrid_format(packet, length) && conn->pq_enabled) {
+        /* Hybrid response - extract peer's ML-KEM public key */
+        if (handle_cookie_response_hybrid(c->mem, cookie, &number, conn->peer_mlkem_public,
+                                           packet, length, conn->shared_key) != sizeof(cookie)) {
+            return -1;
+        }
+
+        if (number != conn->cookie_request_number) {
+            return -1;
+        }
+
+        conn->peer_pq_capable = true;
+
+        /* Create hybrid handshake with ML-KEM encapsulation */
+        if (create_send_handshake_hybrid(c, crypt_connection_id, cookie, conn->dht_public_key) != 0) {
+            return -1;
+        }
+
+        conn->status = CRYPTO_CONN_HANDSHAKE_SENT;
+        return 0;
+    }
+
+    /* Classical cookie response */
     if (handle_cookie_response(c->mem, cookie, &number, packet, length, conn->shared_key) != sizeof(cookie)) {
         return -1;
     }
@@ -1615,6 +2189,8 @@ static int handle_packet_cookie_response(const Net_Crypto *_Nonnull c, int crypt
     if (number != conn->cookie_request_number) {
         return -1;
     }
+
+    conn->peer_pq_capable = false;
 
     if (create_send_handshake(c, crypt_connection_id, cookie, conn->dht_public_key) != 0) {
         return -1;
@@ -1624,7 +2200,7 @@ static int handle_packet_cookie_response(const Net_Crypto *_Nonnull c, int crypt
     return 0;
 }
 
-static int handle_packet_crypto_hs(const Net_Crypto *_Nonnull c, int crypt_connection_id, const uint8_t *_Nonnull packet, uint16_t length,
+static int handle_packet_crypto_hs(Net_Crypto *_Nonnull c, int crypt_connection_id, const uint8_t *_Nonnull packet, uint16_t length,
                                    void *_Nullable userdata)
 {
     Crypto_Connection *conn = get_crypto_connection(c, crypt_connection_id);
@@ -1642,12 +2218,67 @@ static int handle_packet_crypto_hs(const Net_Crypto *_Nonnull c, int crypt_conne
     uint8_t dht_public_key[CRYPTO_PUBLIC_KEY_SIZE];
     uint8_t cookie[COOKIE_LENGTH];
 
+    /* Check for hybrid handshake packet */
+    if (packet_is_hybrid_format(packet, length) && c->pq_enabled) {
+        uint8_t mlkem_ct[TOX_MLKEM768_CIPHERTEXTBYTES];
+        uint8_t mlkem_ss[TOX_MLKEM768_SHAREDSECRETBYTES];
+
+        if (!handle_crypto_handshake_hybrid(c, conn->recv_nonce, conn->peersessionpublic_key,
+                                             peer_real_pk, dht_public_key, cookie,
+                                             mlkem_ct, mlkem_ss,
+                                             packet, length, conn->public_key)) {
+            return -1;
+        }
+
+        if (pk_equal(dht_public_key, conn->dht_public_key)) {
+            /* Store ML-KEM shared secret for this connection */
+            memcpy(conn->mlkem_ciphertext, mlkem_ct, TOX_MLKEM768_CIPHERTEXTBYTES);
+            memcpy(conn->mlkem_shared, mlkem_ss, TOX_MLKEM768_SHAREDSECRETBYTES);
+            conn->session_is_hybrid = true;
+
+            /* Compute X25519 shared secret */
+            uint8_t x25519_shared[32];
+            if (crypto_scalarmult(x25519_shared, conn->sessionsecret_key, conn->peersessionpublic_key) != 0) {
+                sodium_memzero(mlkem_ss, sizeof(mlkem_ss));
+                return -1;
+            }
+
+            /* Hybrid KDF: combine X25519 and ML-KEM shared secrets */
+            static const uint8_t ctx[] = "ToxSession";
+            if (tox_hybrid_kdf(conn->shared_key, x25519_shared, conn->mlkem_shared,
+                               ctx, sizeof(ctx) - 1) != 0) {
+                sodium_memzero(x25519_shared, sizeof(x25519_shared));
+                sodium_memzero(mlkem_ss, sizeof(mlkem_ss));
+                return -1;
+            }
+            sodium_memzero(x25519_shared, sizeof(x25519_shared));
+
+            if (conn->status == CRYPTO_CONN_COOKIE_REQUESTING) {
+                /* We need to respond with hybrid handshake */
+                if (create_send_handshake_hybrid(c, crypt_connection_id, cookie, dht_public_key) != 0) {
+                    return -1;
+                }
+            }
+
+            conn->status = CRYPTO_CONN_NOT_CONFIRMED;
+        } else {
+            if (conn->dht_pk_callback != nullptr) {
+                conn->dht_pk_callback(conn->dht_pk_callback_object, conn->dht_pk_callback_number, dht_public_key, userdata);
+            }
+        }
+
+        return 0;
+    }
+
+    /* Classical handshake */
     if (!handle_crypto_handshake(c, conn->recv_nonce, conn->peersessionpublic_key, peer_real_pk, dht_public_key, cookie,
                                  packet, length, conn->public_key)) {
         return -1;
     }
 
     if (pk_equal(dht_public_key, conn->dht_public_key)) {
+        /* Classical handshake - use classical key derivation */
+        conn->session_is_hybrid = false;
         encrypt_precompute(conn->peersessionpublic_key, conn->sessionsecret_key, conn->shared_key);
 
         if (conn->status == CRYPTO_CONN_COOKIE_REQUESTING) {
@@ -2044,14 +2675,30 @@ int new_crypto_connection(Net_Crypto *c, const uint8_t *real_public_key, const u
     memcpy(conn->dht_public_key, dht_public_key, CRYPTO_PUBLIC_KEY_SIZE);
 
     conn->cookie_request_number = random_u64(c->rng);
-    uint8_t cookie_request[COOKIE_REQUEST_LENGTH];
 
-    if (create_cookie_request(c, cookie_request, conn->dht_public_key, conn->cookie_request_number,
-                              conn->shared_key) != sizeof(cookie_request)
-            || new_temp_packet(c, crypt_connection_id, cookie_request, sizeof(cookie_request)) != 0) {
-        kill_tcp_connection_to(c->tcp_c, conn->connection_number_tcp);
-        wipe_crypto_connection(c, crypt_connection_id);
-        return -1;
+    /* Try hybrid cookie request if PQ is enabled */
+    if (c->pq_enabled) {
+        uint8_t cookie_request[HYBRID_COOKIE_REQUEST_LENGTH];
+        conn->pq_enabled = true;
+
+        if (create_cookie_request_hybrid(c, cookie_request, conn->dht_public_key,
+                                          conn->cookie_request_number, conn->shared_key) != sizeof(cookie_request)
+                || new_temp_packet(c, crypt_connection_id, cookie_request, sizeof(cookie_request)) != 0) {
+            kill_tcp_connection_to(c->tcp_c, conn->connection_number_tcp);
+            wipe_crypto_connection(c, crypt_connection_id);
+            return -1;
+        }
+    } else {
+        uint8_t cookie_request[COOKIE_REQUEST_LENGTH];
+        conn->pq_enabled = false;
+
+        if (create_cookie_request(c, cookie_request, conn->dht_public_key, conn->cookie_request_number,
+                                  conn->shared_key) != sizeof(cookie_request)
+                || new_temp_packet(c, crypt_connection_id, cookie_request, sizeof(cookie_request)) != 0) {
+            kill_tcp_connection_to(c->tcp_c, conn->connection_number_tcp);
+            wipe_crypto_connection(c, crypt_connection_id);
+            return -1;
+        }
     }
 
     return crypt_connection_id;
@@ -2885,6 +3532,19 @@ bool crypto_connection_status(const Net_Crypto *c, int crypt_connection_id, bool
 void new_keys(Net_Crypto *c)
 {
     crypto_new_keypair(c->rng, c->self_public_key, c->self_secret_key);
+
+    /* Generate ML-KEM-768 keypair if PQ is available */
+    if (tox_pq_available()) {
+        if (crypto_kem_mlkem768_keypair(c->self_mlkem_public, c->self_mlkem_secret) == 0) {
+            c->pq_enabled = true;
+        } else {
+            c->pq_enabled = false;
+            sodium_memzero(c->self_mlkem_public, sizeof(c->self_mlkem_public));
+            sodium_memzero(c->self_mlkem_secret, sizeof(c->self_mlkem_secret));
+        }
+    } else {
+        c->pq_enabled = false;
+    }
 }
 
 /** @brief Save the public and private keys to the keys array.
