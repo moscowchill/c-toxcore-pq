@@ -1,12 +1,12 @@
-# aqTox-PQ: Hybrid Post-Quantum Tox Client Implementation Plan
+# c-toxcore-pq: Hybrid Post-Quantum Tox Protocol Implementation
 
-**Project**: Hybrid backwards-compatible post-quantum secure Tox client for Android  
-**Base Fork**: [moscowchill/aqTox](https://github.com/moscowchill/aqTox)  
-**Target**: ML-KEM-768 + X25519 hybrid key exchange with graceful legacy fallback
+**Project**: ML-KEM-768 + X25519 hybrid post-quantum key exchange for c-toxcore
+**Base Fork**: [TokTok/c-toxcore](https://github.com/TokTok/c-toxcore)
+**Target**: Quantum-resistant encryption with backwards compatibility for legacy Tox clients
 
 ## Executive Summary
 
-This implementation adds post-quantum cryptographic protection to Tox messaging while maintaining full backwards compatibility with existing Tox clients. The approach uses libsodium's native ML-KEM-768 implementation combined with existing X25519 in a hybrid scheme, ensuring security even if one primitive is broken.
+This implementation adds post-quantum cryptographic protection to the Tox protocol while maintaining full backwards compatibility with existing Tox clients. The approach uses libsodium's native ML-KEM-768 implementation combined with existing X25519 in a hybrid scheme, ensuring security even if one primitive is broken.
 
 ### Key Design Decisions
 
@@ -14,42 +14,10 @@ This implementation adds post-quantum cryptographic protection to Tox messaging 
 |----------|--------|-----------|
 | PQ Algorithm | ML-KEM-768 | NIST FIPS 203 standardized, available in libsodium master |
 | Hybrid Mode | X25519 + ML-KEM-768 | Belt-and-suspenders security during transition |
-| Compatibility | Option A (Full Interop) | Negotiate PQ with capable peers, fallback to classical |
+| Compatibility | Full Interop | Negotiate PQ with capable peers, fallback to classical |
 | Library | libsodium only | No external PQ library needed, simplifies build |
 | Negotiation | In-band signaling | PQ marker (0x02) in cookie request, no protocol break |
 | Identity | ML-KEM commitment | 46-byte Tox ID with 8-byte ML-KEM commitment for quantum-resistant identity |
-
-### Architecture Overview
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         aqTox-PQ (Android)                          │
-├─────────────────────────────────────────────────────────────────────┤
-│  Kotlin UI Layer          │  Security Status Display                │
-│  - Connection indicators  │  - "PQ-Verified" / "PQ" / "Classical"  │
-│  - Settings for PQ policy │  - Per-friend identity status           │
-├───────────────────────────┴─────────────────────────────────────────┤
-│                         tox4j JNI Bridge                            │
-│  - Extended API for PQ status queries                               │
-│  - Hybrid identity management (46-byte addresses)                   │
-├─────────────────────────────────────────────────────────────────────┤
-│                    c-toxcore (Modified)                             │
-│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  │
-│  │  crypto_core_pq  │  │    net_crypto    │  │    Messenger     │  │
-│  │  - Hybrid KDF    │  │  - PQ handshake  │  │  - PQ address    │  │
-│  │  - ML-KEM wrap   │  │  - In-band nego  │  │  - Identity      │  │
-│  │  - Commitment    │  │  - Fallback      │  │    verification  │  │
-│  └────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘  │
-│           │                     │                     │             │
-│           └─────────────────────┴─────────────────────┘             │
-│                                 │                                   │
-├─────────────────────────────────┴───────────────────────────────────┤
-│                      libsodium (upgraded)                           │
-│  - crypto_scalarmult_curve25519 (existing)                          │
-│  - crypto_kem_mlkem768_* (new in master)                            │
-│  - crypto_kdf_hkdf_sha512_* (key derivation)                        │
-└─────────────────────────────────────────────────────────────────────┘
-```
 
 ## Project Structure
 
@@ -60,10 +28,12 @@ docs/pq-hybrid/
 ├── 02-CRYPTO-DESIGN.md                # Cryptographic protocol specification
 ├── 03-PROTOCOL-NEGOTIATION.md         # In-band capability negotiation
 ├── 05-IDENTITY-COMMITMENT.md          # Quantum-resistant identity (46-byte address)
-├── PHASE-1-FOUNDATION.md              # ML-KEM + X25519 primitives (✅ Complete)
-├── PHASE-2-HANDSHAKE.md               # Session establishment (✅ Complete)
-├── PHASE-3-INTEGRATION.md             # aTox integration and UI
-└── PHASE-4-TESTING.md                 # Test strategy and validation
+├── PHASE-1-FOUNDATION.md              # ML-KEM + X25519 primitives
+├── PHASE-2-HANDSHAKE.md               # Session establishment
+├── PHASE-4-TESTING.md                 # Test strategy and validation
+└── qatox/                             # Android client documentation (separate)
+    ├── README.md
+    └── PHASE-3-INTEGRATION.md
 
 toxcore/ (modified files)
 ├── crypto_core_pq.h                   # PQ crypto API: hybrid KDF, ML-KEM wrappers, commitment
@@ -81,11 +51,10 @@ auto_tests/
 
 | Phase | Status | Description |
 |-------|--------|-------------|
-| Phase 1: Foundation | ✅ **Complete** | ML-KEM-768 + X25519 hybrid primitives, HKDF key derivation |
-| Phase 2: Handshake | ✅ **Complete** | In-band PQ negotiation, hybrid cookie/handshake packets |
-| Phase 2.5: Identity | ✅ **Complete** | 46-byte PQ Tox ID with ML-KEM commitment |
-| Phase 3: Integration | 📋 Planned | aTox Android integration, UI security indicators |
-| Phase 4: Testing | 📋 Planned | Comprehensive test suite, security audit |
+| Phase 1: Foundation | **Complete** | ML-KEM-768 + X25519 hybrid primitives, HKDF key derivation |
+| Phase 2: Handshake | **Complete** | In-band PQ negotiation, hybrid cookie/handshake packets |
+| Phase 2.5: Identity | **Complete** | 46-byte PQ Tox ID with ML-KEM commitment |
+| Phase 4: Testing | **In Progress** | Comprehensive test suite, security validation |
 
 ### Phase 1 & 2 Highlights
 
@@ -101,47 +70,40 @@ auto_tests/
 - **Identity verification API**: `tox_friend_get_identity_status()` returns CLASSICAL/PQ_UNVERIFIED/PQ_VERIFIED
 - **Backwards compatible**: 38-byte addresses still work, but identity not quantum-verified
 
-## Original Timeline (for reference)
-
-| Phase | Duration | Deliverable |
-|-------|----------|-------------|
-| Phase 1: Foundation | 4-6 weeks | Hybrid crypto primitives in c-toxcore |
-| Phase 2: Handshake | 6-8 weeks | PQ-capable session establishment |
-| Phase 3: Integration | 4-6 weeks | Android client with security UI |
-| Phase 4: Testing | 2-4 weeks | Interop testing, security review |
-| **Total MVP** | **16-24 weeks** | Production-ready hybrid client |
-
 ## Quick Start
 
 ### Prerequisites
 
-- Android Studio Arctic Fox or later
-- NDK r25 or later
 - CMake 3.18+
 - libsodium master branch (with ML-KEM-768 support)
+- GTest (for unit tests)
 
-### Build Steps (when implementation is complete)
+### Build
 
 ```bash
-# Clone the fork
-git clone --recurse-submodules https://github.com/YOUR_USERNAME/aqTox-PQ.git
-cd aqTox-PQ
+# Initialize submodules (required for cmp library)
+git submodule update --init
 
-# Build modified c-toxcore with PQ support
-cd c-toxcore
-mkdir build && cd build
-cmake .. -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake \
-         -DANDROID_ABI=arm64-v8a \
-         -DANDROID_PLATFORM=android-26
+# Build
+mkdir _build && cd _build
+cmake .. -DCMAKE_BUILD_TYPE=Debug -DAUTOTEST=ON -DUNITTEST=ON
+
 make -j$(nproc)
 
-# Build tox4j with PQ bindings
-cd ../../tox4j
-./scripts/build-aarch64-linux-android -j$(nproc) release
+# Run all tests
+ctest -j$(nproc) --output-on-failure
+```
 
-# Build aqTox-PQ
-cd ..
-./gradlew assembleRelease
+### Build libsodium from Source (if needed)
+
+```bash
+git clone https://github.com/jedisct1/libsodium.git
+cd libsodium
+./autogen.sh
+./configure --prefix=/usr/local
+make -j$(nproc)
+sudo make install
+sudo ldconfig
 ```
 
 ## Security Properties
@@ -158,26 +120,73 @@ cd ..
 - **Key exchange**: Same as above (quantum-resistant session keys)
 - **Identity**: X25519 public key only (friend added with 38-byte address)
 - **Identity status**: `PQ_UNVERIFIED` - Session quantum-safe, but identity could theoretically be spoofed by quantum attacker
-- **User notification**: UI indicates "PQ" badge (vs "PQ-Verified")
 
 ### With legacy peer (classical fallback)
 - **Key exchange**: X25519 only (existing Tox security)
 - **Identity status**: `CLASSICAL` - No quantum protection
-- **User notification**: UI indicates "Classical" badge
 - **No protocol break**: Legacy clients work normally
+
+## Backwards Compatibility Matrix
+
+| Client A | Client B | Key Exchange | Session Security | Identity Security |
+|----------|----------|--------------|------------------|-------------------|
+| c-toxcore-pq (46-byte) | c-toxcore-pq | Hybrid | Quantum-resistant | PQ_VERIFIED |
+| c-toxcore-pq (38-byte) | c-toxcore-pq | Hybrid | Quantum-resistant | PQ_UNVERIFIED |
+| c-toxcore-pq | Legacy Tox | X25519 only | Classical | CLASSICAL |
+| Legacy Tox | c-toxcore-pq | X25519 only | Classical | CLASSICAL |
+| Legacy Tox | Legacy Tox | X25519 only | Classical | CLASSICAL |
+
+## Public API Additions
+
+### Get PQ Tox Address
+
+```c
+// Get 46-byte PQ address with ML-KEM commitment
+bool tox_self_get_address_pq(const Tox *tox, uint8_t address[TOX_ADDRESS_SIZE_PQ]);
+
+// Check if PQ identity available
+bool tox_self_has_pq_identity(const Tox *tox);
+```
+
+### Add Friend with PQ Address
+
+```c
+// Add friend with 46-byte PQ address
+Tox_Friend_Number tox_friend_add_pq(
+    Tox *tox,
+    const uint8_t address[TOX_ADDRESS_SIZE_PQ],
+    const uint8_t message[],
+    size_t length,
+    Tox_Err_Friend_Add *error);
+```
+
+### Query Identity Status
+
+```c
+typedef enum Tox_Connection_Identity {
+    TOX_CONNECTION_IDENTITY_UNKNOWN,
+    TOX_CONNECTION_IDENTITY_CLASSICAL,
+    TOX_CONNECTION_IDENTITY_PQ_UNVERIFIED,
+    TOX_CONNECTION_IDENTITY_PQ_VERIFIED,
+} Tox_Connection_Identity;
+
+Tox_Connection_Identity tox_friend_get_identity_status(
+    const Tox *tox,
+    Tox_Friend_Number friend_number,
+    Tox_Err_Friend_Query *error);
+```
 
 ## Contributing
 
-See individual phase documents for detailed implementation guidance. Key areas needing work:
+See individual phase documents for detailed implementation guidance. Key areas:
 
-1. **Android UI**: Security indicator design (Phase 3)
-2. **tox4j bindings**: JNI bridge for PQ address and identity status APIs
-3. **Testing**: Interoperability test suite with real devices
-4. **Security audit**: Third-party review of cryptographic implementation
+1. **Testing**: Expand test coverage, fuzzing
+2. **Security audit**: Third-party review of cryptographic implementation
+3. **Client integration**: See [qatox/](qatox/) for Android client documentation
 
 ## License
 
-GPL-3.0 (same as c-toxcore and aTox)
+GPL-3.0-or-later (same as c-toxcore)
 
 ## References
 

@@ -479,10 +479,10 @@ Tox_Friend_Number tox_friend_add_pq(
 1. **No algorithm negotiation**: Hardcoded to ML-KEM-768
 2. **Commitment collision resistance**: 8-byte commitment has 64-bit collision resistance (sufficient for target security level)
 
-## Next: Phase 3
+## Next Steps
 
-With protocol changes complete, Phase 3 focuses on:
-- aTox Android UI integration
-- Security indicators (hybrid vs classical)
-- User preferences for PQ policy
-- Build system for ARM/x86 ABIs
+With protocol changes complete, focus areas include:
+- Expanding test coverage and fuzzing
+- Security audit of cryptographic implementation
+- Client integration (see [qatox/](qatox/) for Android client documentation)
+- DHT/onion layer PQ upgrades (future work)

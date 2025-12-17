@@ -2,7 +2,7 @@
 
 ## Overview
 
-PQ capability negotiation in aqTox-PQ uses **in-band signaling** during the initial handshake, rather than a separate negotiation phase. This approach:
+PQ capability negotiation in c-toxcore-pq uses **in-band signaling** during the initial handshake, rather than a separate negotiation phase. This approach:
 
 1. Minimizes protocol changes
 2. Works without ToxExt dependency

@@ -1,8 +1,7 @@
 # Phase 4: Testing & Validation
 
-**Duration**: 2-4 weeks  
-**Goal**: Comprehensive testing and preparation for security audit  
-**Prerequisites**: Phase 3 complete (Android app running)
+**Goal**: Comprehensive testing and preparation for security audit
+**Prerequisites**: Phase 1 & 2 complete (c-toxcore-pq building and passing tests)
 
 ## Testing Strategy
 
@@ -11,13 +10,13 @@
 │                    Testing Pyramid                          │
 ├─────────────────────────────────────────────────────────────┤
 │                    ┌───────────┐                            │
-│                    │   E2E     │  Manual + Espresso         │
+│                    │  Manual   │  Interoperability tests    │
 │                   ─┴───────────┴─                           │
 │                 ┌─────────────────┐                         │
 │                 │   Integration   │  Protocol tests         │
 │               ──┴─────────────────┴──                       │
 │             ┌───────────────────────────┐                   │
-│             │       Unit Tests          │  Crypto, Kotlin   │
+│             │       Unit Tests          │  Crypto primitives │
 │           ──┴───────────────────────────┴──                 │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -157,26 +156,6 @@ int main(void) {
 }
 ```
 
-### 1.2 Kotlin Unit Tests
-
-```kotlin
-// domain/src/test/kotlin/ConnectionSecurityTest.kt
-
-class ConnectionSecurityTest {
-    @Test
-    fun `maps HYBRID correctly`() {
-        assertEquals(ConnectionSecurity.HYBRID, 
-                     ConnectionSecurity.fromTox(ToxConnectionSecurity.HYBRID))
-    }
-    
-    @Test
-    fun `maps CLASSICAL correctly`() {
-        assertEquals(ConnectionSecurity.CLASSICAL,
-                     ConnectionSecurity.fromTox(ToxConnectionSecurity.CLASSICAL))
-    }
-}
-```
-
 ## 2. Integration Tests
 
 ### 2.1 Protocol Tests
@@ -214,63 +193,36 @@ START_TEST(test_pq_clients_establish_hybrid)
 END_TEST
 ```
 
-## 3. Android Instrumented Tests
-
-```kotlin
-// app/src/androidTest/kotlin/PqInstrumentedTest.kt
-
-@RunWith(AndroidJUnit4::class)
-class PqInstrumentedTest {
-    @get:Rule
-    val composeRule = createComposeRule()
-    
-    @Test
-    fun securityBadgeShowsPQ() {
-        composeRule.setContent {
-            SecurityBadge(ConnectionSecurity.HYBRID)
-        }
-        composeRule.onNodeWithText("PQ").assertIsDisplayed()
-    }
-    
-    @Test
-    fun securityBadgeShowsClassic() {
-        composeRule.setContent {
-            SecurityBadge(ConnectionSecurity.CLASSICAL)
-        }
-        composeRule.onNodeWithText("Classic").assertIsDisplayed()
-    }
-}
-```
-
-## 4. Manual Test Checklist
+## 3. Manual Test Checklist
 
 ```markdown
 ## Manual Testing
 
 ### Setup
-- [ ] Device A: aqTox-PQ (PQ-capable)
-- [ ] Device B: aqTox-PQ (PQ-capable)  
-- [ ] Device C: Legacy aTox (classical)
+- [ ] Instance A: c-toxcore-pq (PQ-capable)
+- [ ] Instance B: c-toxcore-pq (PQ-capable)
+- [ ] Instance C: Legacy c-toxcore (classical)
 
 ### Hybrid Tests (A ↔ B)
 - [ ] Friend connection establishes
-- [ ] Security badge shows "PQ"
-- [ ] Info dialog shows "hybrid post-quantum"
+- [ ] tox_friend_get_identity_status() returns PQ_VERIFIED (with 46-byte address)
+- [ ] tox_friend_get_identity_status() returns PQ_UNVERIFIED (with 38-byte address)
 - [ ] Messages work correctly
-- [ ] Reconnection maintains hybrid
+- [ ] Reconnection maintains hybrid session
 
 ### Fallback Tests (A ↔ C)
 - [ ] Connection establishes
-- [ ] Badge shows "Classic"
-- [ ] Messages work
-- [ ] Warning about reduced security (optional)
+- [ ] tox_friend_get_identity_status() returns CLASSICAL
+- [ ] Messages work correctly
+- [ ] No protocol errors on legacy side
 
-### Settings
-- [ ] PQ status visible in settings
-- [ ] Policy changes persist
+### API Tests
+- [ ] tox_self_get_address_pq() returns valid 46-byte address
+- [ ] tox_self_has_pq_identity() returns true when PQ available
+- [ ] tox_friend_add_pq() accepts 46-byte addresses
 ```
 
-## 5. CI/CD Pipeline
+## 4. CI/CD Pipeline
 
 ```yaml
 # .github/workflows/test.yml
@@ -278,26 +230,30 @@ name: Tests
 on: [push, pull_request]
 
 jobs:
-  native:
+  build-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with: { submodules: recursive }
-      - run: |
-          sudo apt-get install cmake ninja-build check
-          cd native/libsodium && ./autogen.sh && ./configure && make && sudo make install
-          cd ../c-toxcore && mkdir build && cd build && cmake .. && make && ctest
-          
-  android:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with: { java-version: '17', distribution: 'temurin' }
-      - run: ./gradlew testDebugUnitTest
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libgtest-dev
+      - name: Build libsodium from master
+        run: |
+          git clone https://github.com/jedisct1/libsodium.git
+          cd libsodium
+          ./autogen.sh && ./configure && make -j$(nproc)
+          sudo make install && sudo ldconfig
+      - name: Build and test c-toxcore-pq
+        run: |
+          mkdir _build && cd _build
+          cmake .. -DAUTOTEST=ON -DUNITTEST=ON
+          make -j$(nproc)
+          ctest -j$(nproc) --output-on-failure
 ```
 
-## 6. Performance Benchmarks
+## 5. Performance Benchmarks
 
 ```c
 /* bench/crypto_bench.c */
@@ -330,7 +286,7 @@ void bench_hybrid_session() {
 | ML-KEM encaps | ~0.1 ms |
 | Full handshake | ~0.5 ms |
 
-## 7. Security Audit Preparation
+## 6. Security Audit Preparation
 
 ### Documentation Package
 - Architecture overview
@@ -348,10 +304,11 @@ $30,000 - $50,000 for professional audit
 
 ## Phase 4 Checklist
 
-- [ ] All unit tests passing
-- [ ] Integration tests passing
-- [ ] Manual testing complete
+- [ ] All unit tests passing (`unit_crypto_pq_test`, etc.)
+- [ ] Integration tests passing (`auto_crypto_pq_test`, `auto_friend_connection_test`)
+- [ ] Interoperability testing with legacy c-toxcore complete
 - [ ] CI/CD pipeline working
-- [ ] Performance acceptable
-- [ ] Audit documentation ready
-- [ ] No memory leaks (ASan)
+- [ ] Performance benchmarks acceptable
+- [ ] Security audit documentation prepared
+- [ ] No memory leaks (ASan clean)
+- [ ] No undefined behavior (UBSan clean)

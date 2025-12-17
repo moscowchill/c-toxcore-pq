@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document specifies the cryptographic protocols for hybrid post-quantum key exchange in aqTox-PQ. The design follows established patterns from Signal's PQXDH and IETF hybrid key exchange drafts.
+This document specifies the cryptographic protocols for hybrid post-quantum key exchange in c-toxcore-pq. The design follows established patterns from Signal's PQXDH and IETF hybrid key exchange drafts.
 
 ## Design Principles
 

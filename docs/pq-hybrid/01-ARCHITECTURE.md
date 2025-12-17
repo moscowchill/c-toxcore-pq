@@ -8,13 +8,10 @@ Understanding the existing crypto flow is essential before modifying it.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ Layer 5: Application (aTox Kotlin)                              │
-│ - User messages, file transfers, A/V                            │
-│ - No direct crypto operations                                   │
-├─────────────────────────────────────────────────────────────────┤
 │ Layer 4: Messenger (Messenger.c)                                │
 │ - Friend management, message routing                            │
 │ - Uses net_crypto for all secure communications                 │
+│ - Public API: tox.h                                             │
 ├─────────────────────────────────────────────────────────────────┤
 │ Layer 3: Net Crypto (net_crypto.c) ← PRIMARY MODIFICATION POINT │
 │ - Session key establishment (cookie + handshake)                │
@@ -24,7 +21,7 @@ Understanding the existing crypto flow is essential before modifying it.
 │ Layer 2: DHT + Onion (DHT.c, onion*.c)                          │
 │ - Peer discovery, NAT traversal                                 │
 │ - Onion routing for friend finding                              │
-│ - Each layer has own crypto (Phase 3 scope)                     │
+│ - Each layer has own crypto (future scope)                      │
 ├─────────────────────────────────────────────────────────────────┤
 │ Layer 1: Crypto Core (crypto_core.c) ← FOUNDATION MODIFICATIONS │
 │ - All cryptographic primitives                                  │
@@ -486,22 +483,6 @@ cleanup:
 | `toxcore/tox.c` | API implementations | Phase 2 |
 | `CMakeLists.txt` | Ensure libsodium version with ML-KEM | Phase 1 |
 
-### tox4j Files to Modify
-
-| File | Changes | Priority |
-|------|---------|----------|
-| `ToxCore.scala` | Add PQ status methods | Phase 3 |
-| `ToxCoreJni.cpp` | JNI bindings for new functions | Phase 3 |
-
-### aTox Files to Modify
-
-| File | Changes | Priority |
-|------|---------|----------|
-| `domain/tox/Tox.kt` | Expose PQ connection status | Phase 3 |
-| `ui/chat/ChatFragment.kt` | Security indicator in chat header | Phase 3 |
-| `ui/contactlist/ContactListFragment.kt` | Per-contact security badges | Phase 3 |
-| `ui/settings/SettingsFragment.kt` | PQ policy preferences | Phase 3 |
-
 ## Quantum-Resistant Identity
 
 ### The Identity Problem
@@ -582,10 +563,10 @@ Where:
 
 | Client A | Client B | Key Exchange | Session Security | Identity Security |
 |----------|----------|--------------|------------------|-------------------|
-| aqTox-PQ (46-byte) | aqTox-PQ | Hybrid | Quantum-resistant | PQ_VERIFIED |
-| aqTox-PQ (38-byte) | aqTox-PQ | Hybrid | Quantum-resistant | PQ_UNVERIFIED |
-| aqTox-PQ | Legacy Tox | X25519 only | Classical | CLASSICAL |
-| Legacy Tox | aqTox-PQ | X25519 only | Classical | CLASSICAL |
+| c-toxcore-pq (46-byte) | c-toxcore-pq | Hybrid | Quantum-resistant | PQ_VERIFIED |
+| c-toxcore-pq (38-byte) | c-toxcore-pq | Hybrid | Quantum-resistant | PQ_UNVERIFIED |
+| c-toxcore-pq | Legacy Tox | X25519 only | Classical | CLASSICAL |
+| Legacy Tox | c-toxcore-pq | X25519 only | Classical | CLASSICAL |
 | Legacy Tox | Legacy Tox | X25519 only | Classical | CLASSICAL |
 
-The hybrid client initiates capability discovery and gracefully falls back when the peer doesn't support PQ extensions.
+The PQ-capable client initiates capability discovery and gracefully falls back when the peer doesn't support PQ extensions.

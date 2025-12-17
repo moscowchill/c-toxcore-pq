@@ -1,6 +1,5 @@
 # Phase 1: Foundation
 
-**Duration**: 4-6 weeks  
 **Goal**: Establish hybrid cryptographic primitives in c-toxcore
 
 ## Overview
@@ -22,10 +21,6 @@ No protocol changes yet - this phase creates the building blocks.
 sudo apt-get install build-essential cmake ninja-build
 sudo apt-get install autoconf automake libtool
 sudo apt-get install pkg-config
-
-# For Android cross-compilation
-# NDK r25 or later
-export ANDROID_NDK=/path/to/android-ndk-r25c
 ```
 
 ### libsodium with ML-KEM Support
@@ -98,7 +93,7 @@ Create `toxcore/crypto_core_pq.h`:
 
 ```c
 /* SPDX-License-Identifier: GPL-3.0-or-later
- * Copyright © 2024 aqTox-PQ contributors
+ * Copyright © 2024 c-toxcore-pq contributors
  *
  * Post-quantum hybrid cryptographic primitives for Tox.
  */
@@ -373,7 +368,7 @@ Create `toxcore/crypto_core_pq.c`:
 
 ```c
 /* SPDX-License-Identifier: GPL-3.0-or-later
- * Copyright © 2024 aqTox-PQ contributors
+ * Copyright © 2024 c-toxcore-pq contributors
  */
 
 #include "crypto_core_pq.h"

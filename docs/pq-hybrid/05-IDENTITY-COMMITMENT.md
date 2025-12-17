@@ -2,7 +2,7 @@
 
 ## Problem Statement
 
-While Phase 1 and Phase 2 of aqTox-PQ provide quantum-resistant session keys through ML-KEM-768 + X25519 hybrid key exchange, the **identity** of users remains vulnerable to quantum attack.
+While Phase 1 and Phase 2 of c-toxcore-pq provide quantum-resistant session keys through ML-KEM-768 + X25519 hybrid key exchange, the **identity** of users remains vulnerable to quantum attack.
 
 The traditional 38-byte Tox address format:
 ```
