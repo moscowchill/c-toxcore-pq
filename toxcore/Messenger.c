@@ -136,6 +136,49 @@ void getaddress(const Messenger *m, uint8_t *address)
     memcpy(address + CRYPTO_PUBLIC_KEY_SIZE + sizeof(nospam), &checksum, sizeof(checksum));
 }
 
+/**
+ * Format: `[real_pk (32 bytes)][MLKEM_commitment (8 bytes)][nospam (4 bytes)][checksum (2 bytes)]`
+ *
+ * @param[out] address TOX_ADDRESS_SIZE_PQ byte PQ address to give to others.
+ * @return true if PQ identity is available, false if PQ not enabled.
+ */
+bool getaddress_pq(const Messenger *m, uint8_t *address)
+{
+    const uint8_t *mlkem_pk = nc_get_self_mlkem_public(m->net_crypto);
+    if (mlkem_pk == NULL) {
+        return false;
+    }
+
+    /* [X25519 public key: 32 bytes] */
+    pk_copy(address, nc_get_self_public_key(m->net_crypto));
+    size_t offset = CRYPTO_PUBLIC_KEY_SIZE;
+
+    /* [ML-KEM commitment: 8 bytes] */
+    if (tox_mlkem_commitment(address + offset, mlkem_pk) != 0) {
+        return false;
+    }
+    offset += TOX_MLKEM_COMMITMENT_SIZE;
+
+    /* [nospam: 4 bytes] */
+    uint32_t nospam = get_nospam(m->fr);
+    memcpy(address + offset, &nospam, sizeof(nospam));
+    offset += sizeof(nospam);
+
+    /* [checksum: 2 bytes] - computed over first 44 bytes */
+    uint16_t checksum = data_checksum(address, offset);
+    memcpy(address + offset, &checksum, sizeof(checksum));
+
+    return true;
+}
+
+/**
+ * @return true if this Messenger has PQ identity (ML-KEM keypair available).
+ */
+bool has_pq_identity(const Messenger *m)
+{
+    return nc_pq_enabled(m->net_crypto);
+}
+
 static bool send_online_packet(const Messenger *_Nonnull m, int friendcon_id)
 {
     const uint8_t packet[1] = {PACKET_ID_ONLINE};
@@ -294,6 +337,98 @@ int32_t m_addfriend(Messenger *m, const uint8_t *address, const uint8_t *data, u
     memcpy(m->friendlist[ret].info, data, length);
     m->friendlist[ret].info_size = length;
     memcpy(&m->friendlist[ret].friendrequest_nospam, address + CRYPTO_PUBLIC_KEY_SIZE, sizeof(uint32_t));
+
+    return ret;
+}
+
+/**
+ * Add a friend using a 46-byte PQ address.
+ *
+ * The PQ address format is:
+ *   [X25519_pk:32][ML-KEM_commit:8][nospam:4][checksum:2] = 46 bytes
+ *
+ * This stores the ML-KEM commitment for verification during handshake.
+ *
+ * @param m Messenger instance
+ * @param address 46-byte PQ address
+ * @param data Friend request message
+ * @param length Message length
+ *
+ * @return friend number on success
+ * @retval FAERR_* on failure
+ */
+int32_t m_addfriend_pq(Messenger *m, const uint8_t *address, const uint8_t *data, uint16_t length)
+{
+    if (length > MAX_FRIEND_REQUEST_DATA_SIZE) {
+        return FAERR_TOOLONG;
+    }
+
+    uint8_t real_pk[CRYPTO_PUBLIC_KEY_SIZE];
+    pk_copy(real_pk, address);
+
+    if (!public_key_valid(real_pk)) {
+        return FAERR_BADCHECKSUM;
+    }
+
+    /* Verify checksum - for 46-byte address, checksum is at offset 44 */
+    uint16_t check;
+    const size_t checksum_offset = CRYPTO_PUBLIC_KEY_SIZE + TOX_MLKEM_COMMITMENT_SIZE + sizeof(uint32_t);
+    const uint16_t checksum = data_checksum(address, checksum_offset);
+    memcpy(&check, address + checksum_offset, sizeof(check));
+
+    if (check != checksum) {
+        return FAERR_BADCHECKSUM;
+    }
+
+    if (length < 1) {
+        return FAERR_NOMESSAGE;
+    }
+
+    if (pk_equal(real_pk, nc_get_self_public_key(m->net_crypto))) {
+        return FAERR_OWNKEY;
+    }
+
+    const int32_t friend_id = getfriend_id(m, real_pk);
+
+    if (friend_id != -1) {
+        if (m->friendlist[friend_id].status >= FRIEND_CONFIRMED) {
+            return FAERR_ALREADYSENT;
+        }
+
+        /* Extract nospam from 46-byte address (offset 40) */
+        uint32_t nospam;
+        memcpy(&nospam, address + CRYPTO_PUBLIC_KEY_SIZE + TOX_MLKEM_COMMITMENT_SIZE, sizeof(nospam));
+
+        if (m->friendlist[friend_id].friendrequest_nospam == nospam) {
+            return FAERR_ALREADYSENT;
+        }
+
+        m->friendlist[friend_id].friendrequest_nospam = nospam;
+        return FAERR_SETNEWNOSPAM;
+    }
+
+    const int32_t ret = init_new_friend(m, real_pk, FRIEND_ADDED);
+
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* Store friend request info */
+    m->friendlist[ret].friendrequest_timeout = FRIENDREQUEST_TIMEOUT;
+    memcpy(m->friendlist[ret].info, data, length);
+    m->friendlist[ret].info_size = length;
+    memcpy(&m->friendlist[ret].friendrequest_nospam,
+           address + CRYPTO_PUBLIC_KEY_SIZE + TOX_MLKEM_COMMITMENT_SIZE, sizeof(uint32_t));
+
+    /* Store ML-KEM commitment from PQ address */
+    memcpy(m->friendlist[ret].mlkem_commitment,
+           address + CRYPTO_PUBLIC_KEY_SIZE, TOX_MLKEM_COMMITMENT_SIZE);
+    m->friendlist[ret].has_mlkem_commitment = true;
+    m->friendlist[ret].mlkem_verified = false;
+
+    /* Pass commitment to friend_connection layer */
+    friend_connection_set_mlkem_commitment(m->fr_c, m->friendlist[ret].friendcon_id,
+                                            m->friendlist[ret].mlkem_commitment);
 
     return ret;
 }
@@ -994,6 +1129,50 @@ void m_callback_read_receipt(Messenger *m, m_friend_read_receipt_cb *function)
 void m_callback_connectionstatus(Messenger *m, m_friend_connection_status_cb *function)
 {
     m->friend_connectionstatuschange = function;
+}
+
+void m_callback_identity_status(Messenger *m, m_friend_identity_status_cb *function)
+{
+    m->friend_identitystatuschange = function;
+}
+
+unsigned int m_get_friend_identity_status(const Messenger *m, int32_t friend_number)
+{
+    if (!m_friend_exists(m, friend_number)) {
+        return 0;  /* UNKNOWN */
+    }
+
+    const Friend *f = &m->friendlist[friend_number];
+
+    /* Check if friend is connected */
+    const int friendcon_id = f->friendcon_id;
+    if (friendcon_id < 0) {
+        return 0;  /* UNKNOWN - not connected */
+    }
+
+    /* Get the crypto connection to check PQ status */
+    const int crypt_conn_id = friend_connection_crypt_connection_id(m->fr_c, friendcon_id);
+    if (crypt_conn_id < 0) {
+        return 0;  /* UNKNOWN - no crypto connection */
+    }
+
+    /* Check if this is a PQ session */
+    const bool is_pq_session = nc_connection_is_pq(m->net_crypto, crypt_conn_id);
+
+    if (!is_pq_session) {
+        return 1;  /* CLASSICAL */
+    }
+
+    /* PQ session - check if commitment was verified */
+    if (!f->has_mlkem_commitment) {
+        return 2;  /* PQ_UNVERIFIED - no commitment to verify */
+    }
+
+    if (f->mlkem_verified) {
+        return 3;  /* PQ_VERIFIED */
+    }
+
+    return 2;  /* PQ_UNVERIFIED - commitment exists but not yet verified */
 }
 
 void m_callback_core_connection(Messenger *m, m_self_connection_status_cb *function)
@@ -1938,6 +2117,24 @@ static int m_handle_status(void *_Nonnull object, int friendcon_id, bool status,
     Messenger *m = (Messenger *)object;
     if (status) { /* Went online. */
         send_online_packet(m, m->friendlist[friendcon_id].friendcon_id);
+
+        /* Propagate ML-KEM verification status from friend_connection */
+        Friend *f = &m->friendlist[friendcon_id];
+        const int fc_id = f->friendcon_id;
+        const bool was_verified = f->mlkem_verified;
+
+        /* Update verification status from friend_connection layer */
+        if (friend_connection_has_mlkem_commitment(m->fr_c, fc_id)) {
+            f->mlkem_verified = friend_connection_mlkem_verified(m->fr_c, fc_id);
+        } else {
+            f->mlkem_verified = false;
+        }
+
+        /* Trigger identity status callback if verification status changed */
+        if (f->mlkem_verified != was_verified && m->friend_identitystatuschange != nullptr) {
+            const unsigned int identity_status = m_get_friend_identity_status(m, friendcon_id);
+            m->friend_identitystatuschange(m, friendcon_id, identity_status, userdata);
+        }
     } else { /* Went offline. */
         if (m->friendlist[friendcon_id].status == FRIEND_ONLINE) {
             set_friend_status(m, friendcon_id, FRIEND_CONFIRMED, userdata);

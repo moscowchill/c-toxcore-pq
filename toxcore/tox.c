@@ -1227,6 +1227,30 @@ void tox_self_get_address(const Tox *tox, uint8_t address[TOX_ADDRESS_SIZE])
     }
 }
 
+bool tox_self_get_address_pq(const Tox *tox, uint8_t address[TOX_ADDRESS_SIZE_PQ])
+{
+    assert(tox != nullptr);
+
+    if (address == nullptr) {
+        return false;
+    }
+
+    tox_lock(tox);
+    const bool ret = getaddress_pq(tox->m, address);
+    tox_unlock(tox);
+    return ret;
+}
+
+bool tox_self_has_pq_identity(const Tox *tox)
+{
+    assert(tox != nullptr);
+
+    tox_lock(tox);
+    const bool ret = has_pq_identity(tox->m);
+    tox_unlock(tox);
+    return ret;
+}
+
 void tox_self_set_nospam(Tox *tox, uint32_t nospam)
 {
     assert(tox != nullptr);
@@ -1450,6 +1474,31 @@ uint32_t tox_friend_add_norequest(Tox *tox, const uint8_t public_key[TOX_PUBLIC_
 
     tox_lock(tox);
     const int32_t ret = m_addfriend_norequest(tox->m, public_key);
+
+    if (ret >= 0) {
+        SET_ERROR_PARAMETER(error, TOX_ERR_FRIEND_ADD_OK);
+        tox_unlock(tox);
+        return (uint32_t)ret;
+    }
+
+    set_friend_error(tox->m->log, ret, error);
+    tox_unlock(tox);
+    return UINT32_MAX;
+}
+
+uint32_t tox_friend_add_pq(Tox *tox, const uint8_t address[TOX_ADDRESS_SIZE_PQ],
+                           const uint8_t *message, size_t length,
+                           Tox_Err_Friend_Add *error)
+{
+    assert(tox != nullptr);
+
+    if (address == nullptr || message == nullptr) {
+        SET_ERROR_PARAMETER(error, TOX_ERR_FRIEND_ADD_NULL);
+        return UINT32_MAX;
+    }
+
+    tox_lock(tox);
+    const int32_t ret = m_addfriend_pq(tox->m, address, message, length);
 
     if (ret >= 0) {
         SET_ERROR_PARAMETER(error, TOX_ERR_FRIEND_ADD_OK);
@@ -1705,6 +1754,30 @@ void tox_callback_friend_connection_status(Tox *tox, tox_friend_connection_statu
 {
     assert(tox != nullptr);
     tox->friend_connection_status_callback = callback;
+}
+
+Tox_Connection_Identity tox_friend_get_identity_status(
+    const Tox *tox, Tox_Friend_Number friend_number, Tox_Err_Friend_Query *error)
+{
+    assert(tox != nullptr);
+    tox_lock(tox);
+    const unsigned int ret = m_get_friend_identity_status(tox->m, friend_number);
+    tox_unlock(tox);
+
+    /* ret == 0 means UNKNOWN (friend not found or not connected) */
+    if (!m_friend_exists(tox->m, friend_number)) {
+        SET_ERROR_PARAMETER(error, TOX_ERR_FRIEND_QUERY_FRIEND_NOT_FOUND);
+        return TOX_CONNECTION_IDENTITY_UNKNOWN;
+    }
+
+    SET_ERROR_PARAMETER(error, TOX_ERR_FRIEND_QUERY_OK);
+    return (Tox_Connection_Identity)ret;
+}
+
+void tox_callback_friend_identity_status(Tox *tox, tox_friend_identity_status_cb *callback)
+{
+    assert(tox != nullptr);
+    tox->friend_identity_status_callback = callback;
 }
 
 bool tox_friend_get_typing(const Tox *tox, uint32_t friend_number, Tox_Err_Friend_Query *error)

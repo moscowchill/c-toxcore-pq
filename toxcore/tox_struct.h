@@ -29,6 +29,7 @@ struct Tox {
     tox_friend_status_message_cb *friend_status_message_callback;
     tox_friend_status_cb *friend_status_callback;
     tox_friend_connection_status_cb *friend_connection_status_callback;
+    tox_friend_identity_status_cb *friend_identity_status_callback;
     tox_friend_typing_cb *friend_typing_callback;
     tox_friend_read_receipt_cb *friend_read_receipt_callback;
     tox_friend_request_cb *friend_request_callback;

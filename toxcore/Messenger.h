@@ -181,6 +181,8 @@ typedef void m_self_connection_status_cb(Messenger *_Nonnull m, Onion_Connection
 typedef void m_friend_status_cb(Messenger *_Nonnull m, uint32_t friend_number, unsigned int status, void *_Nullable user_data);
 typedef void m_friend_connection_status_cb(Messenger *_Nonnull m, uint32_t friend_number, unsigned int connection_status,
         void *_Nullable user_data);
+typedef void m_friend_identity_status_cb(Messenger *_Nonnull m, uint32_t friend_number, unsigned int identity_status,
+        void *_Nullable user_data);
 typedef void m_friend_message_cb(Messenger *_Nonnull m, uint32_t friend_number, unsigned int message_type,
                                  const uint8_t *_Nonnull message, size_t length, void *_Nullable user_data);
 typedef void m_file_recv_control_cb(Messenger *_Nonnull m, uint32_t friend_number, uint32_t file_number, unsigned int control,
@@ -232,6 +234,12 @@ typedef struct Friend {
     uint32_t friendrequest_nospam; // The nospam number used in the friend request.
     uint64_t last_seen_time;
     Connection_Status last_connection_udp_tcp;
+
+    /* ML-KEM identity commitment for quantum-resistant verification */
+    uint8_t mlkem_commitment[TOX_MLKEM_COMMITMENT_SIZE]; /**< ML-KEM commitment from 46-byte PQ address */
+    bool has_mlkem_commitment;  /**< True if friend was added with 46-byte PQ address */
+    bool mlkem_verified;        /**< True if ML-KEM commitment was verified during handshake */
+
     struct File_Transfers file_sending[MAX_CONCURRENT_FILE_PIPES];
     uint32_t num_sending_files;
     struct File_Transfers file_receiving[MAX_CONCURRENT_FILE_PIPES];
@@ -293,6 +301,7 @@ struct Messenger {
     m_friend_typing_cb *_Nullable friend_typingchange;
     m_friend_read_receipt_cb *_Nullable read_receipt;
     m_friend_connection_status_cb *_Nullable friend_connectionstatuschange;
+    m_friend_identity_status_cb *_Nullable friend_identitystatuschange;
 
     struct Group_Chats *_Nullable conferences_object;
     m_conference_invite_cb *_Nullable conference_invite;
@@ -328,6 +337,19 @@ bool friend_is_valid(const Messenger *_Nonnull m, int32_t friendnumber);
 void getaddress(const Messenger *_Nonnull m, uint8_t *_Nonnull address);
 
 /**
+ * Format: `[real_pk (32 bytes)][MLKEM_commitment (8 bytes)][nospam (4 bytes)][checksum (2 bytes)]`
+ *
+ * @param[out] address TOX_ADDRESS_SIZE_PQ byte PQ address to give to others.
+ * @return true if PQ identity is available, false if PQ not enabled.
+ */
+bool getaddress_pq(const Messenger *_Nonnull m, uint8_t *_Nonnull address);
+
+/**
+ * @return true if this Messenger has PQ identity (ML-KEM keypair available).
+ */
+bool has_pq_identity(const Messenger *_Nonnull m);
+
+/**
  * Add a friend.
  *
  * Set the data that will be sent along with friend request.
@@ -349,6 +371,24 @@ void getaddress(const Messenger *_Nonnull m, uint8_t *_Nonnull address);
  * @retval FAERR_NOMEM if increasing the friend list size fails.
  */
 int32_t m_addfriend(Messenger *_Nonnull m, const uint8_t *_Nonnull address, const uint8_t *_Nonnull data, uint16_t length);
+
+/** @brief Add a friend using a 46-byte PQ address.
+ *
+ * The PQ address format is:
+ *   [X25519_pk:32][ML-KEM_commit:8][nospam:4][checksum:2] = 46 bytes
+ *
+ * This stores the ML-KEM commitment for verification during handshake,
+ * enabling quantum-resistant identity verification.
+ *
+ * @param m Messenger instance
+ * @param address 46-byte PQ address
+ * @param data Friend request message
+ * @param length Message length
+ *
+ * @return the friend number if success.
+ * @retval FAERR_* on failure (same as m_addfriend)
+ */
+int32_t m_addfriend_pq(Messenger *_Nonnull m, const uint8_t *_Nonnull address, const uint8_t *_Nonnull data, uint16_t length);
 
 /** @brief Add a friend without sending a friendrequest.
  * @return the friend number if success.
@@ -578,6 +618,26 @@ void m_callback_read_receipt(Messenger *_Nonnull m, m_friend_read_receipt_cb *_N
  * It's assumed that when adding friends, their connection status is offline.
  */
 void m_callback_connectionstatus(Messenger *_Nonnull m, m_friend_connection_status_cb *_Nonnull function);
+
+/**
+ * @brief Set the callback for PQ identity verification status changes.
+ *
+ * Identity status indicates the quantum-resistance level of identity verification:
+ * - UNKNOWN: Friend not connected
+ * - CLASSICAL: X25519 only session (not quantum-resistant)
+ * - PQ_UNVERIFIED: PQ session but no ML-KEM commitment to verify
+ * - PQ_VERIFIED: PQ session with verified ML-KEM commitment
+ */
+void m_callback_identity_status(Messenger *_Nonnull m, m_friend_identity_status_cb *_Nullable function);
+
+/**
+ * @brief Get the identity verification status for a friend.
+ *
+ * @param m The Messenger
+ * @param friend_number Friend to query
+ * @return Identity status (0=UNKNOWN, 1=CLASSICAL, 2=PQ_UNVERIFIED, 3=PQ_VERIFIED)
+ */
+unsigned int m_get_friend_identity_status(const Messenger *_Nonnull m, int32_t friend_number);
 
 /** @brief Set the callback for typing changes. */
 void m_callback_core_connection(Messenger *_Nonnull m, m_self_connection_status_cb *_Nonnull function);

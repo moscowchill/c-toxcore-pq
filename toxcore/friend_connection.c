@@ -67,7 +67,12 @@ struct Friend_Conn {
 
     /* Post-quantum hybrid fields */
     bool peer_pq_capable;  /* True if peer's identity key is hybrid format */
-    uint8_t peer_mlkem_public[TOX_MLKEM768_PUBLICKEYBYTES];  /* Peer's ML-KEM public key */
+    uint8_t peer_mlkem_public[TOX_MLKEM768_PUBLICKEYBYTES];  /* Peer's ML-KEM public key (for initiating) */
+
+    /* ML-KEM commitment for identity verification */
+    uint8_t mlkem_commitment[TOX_MLKEM_COMMITMENT_SIZE];  /* Commitment from 46-byte address */
+    bool has_mlkem_commitment;  /* True if friend was added with 46-byte address */
+    bool mlkem_verified;        /* True if commitment verified during handshake */
 };
 
 static const Friend_Conn empty_friend_conn = {0};
@@ -409,6 +414,37 @@ static int handle_status(void *_Nonnull object, int id, bool status, void *_Nonn
         friend_con->ping_lastrecv = mono_time_get(fr_c->mono_time);
         friend_con->share_relays_lastsent = 0;
         onion_set_friend_online(fr_c->onion_c, friend_con->onion_friendnum, status);
+
+        /* ML-KEM commitment verification for quantum-resistant identity */
+        friend_con->mlkem_verified = false;  /* Reset verification status */
+
+        if (nc_connection_is_pq(fr_c->net_crypto, friend_con->crypt_connection_id)) {
+            /* Connection is PQ-capable */
+            if (friend_con->has_mlkem_commitment) {
+                /* Friend was added with 46-byte address, verify commitment */
+                uint8_t peer_mlkem_public[TOX_MLKEM768_PUBLICKEYBYTES];
+
+                if (nc_get_peer_mlkem_public(fr_c->net_crypto, friend_con->crypt_connection_id, peer_mlkem_public)) {
+                    if (tox_verify_mlkem_commitment(friend_con->mlkem_commitment, peer_mlkem_public)) {
+                        /* Commitment verified - full PQ identity protection */
+                        friend_con->mlkem_verified = true;
+                        LOGGER_DEBUG(fr_c->logger, "ML-KEM commitment verified for friend %d", id);
+                    } else {
+                        /* Commitment mismatch - possible identity attack! */
+                        LOGGER_ERROR(fr_c->logger, "ML-KEM commitment MISMATCH for friend %d - possible impersonation!", id);
+                        /* Kill the connection for security */
+                        crypto_kill(fr_c->net_crypto, friend_con->crypt_connection_id);
+                        friend_con->crypt_connection_id = -1;
+                        friend_con->status = FRIENDCONN_STATUS_CONNECTING;
+                        return -1;  /* Reject this connection */
+                    }
+                } else {
+                    LOGGER_WARNING(fr_c->logger, "Could not get peer ML-KEM public key for friend %d", id);
+                }
+            }
+            /* else: Friend added with 38-byte address, PQ session but identity not verified */
+        }
+        /* else: Classical connection, no verification needed */
     } else {  /* Went offline. */
         if (friend_con->status != FRIENDCONN_STATUS_CONNECTING) {
             status_changed = true;
@@ -918,6 +954,48 @@ int friend_connection_set_pq_capability(Friend_Connections *fr_c, int friendcon_
     memcpy(friend_con->peer_mlkem_public, peer_mlkem_public, TOX_MLKEM768_PUBLICKEYBYTES);
 
     return 0;
+}
+
+int friend_connection_set_mlkem_commitment(Friend_Connections *fr_c, int friendcon_id,
+                                            const uint8_t *commitment)
+{
+    Friend_Conn *const friend_con = get_conn(fr_c, friendcon_id);
+
+    if (friend_con == nullptr) {
+        return -1;
+    }
+
+    if (commitment == nullptr) {
+        return -1;
+    }
+
+    memcpy(friend_con->mlkem_commitment, commitment, TOX_MLKEM_COMMITMENT_SIZE);
+    friend_con->has_mlkem_commitment = true;
+    friend_con->mlkem_verified = false;  /* Will be verified during handshake */
+
+    return 0;
+}
+
+bool friend_connection_has_mlkem_commitment(const Friend_Connections *fr_c, int friendcon_id)
+{
+    const Friend_Conn *const friend_con = get_conn(fr_c, friendcon_id);
+
+    if (friend_con == nullptr) {
+        return false;
+    }
+
+    return friend_con->has_mlkem_commitment;
+}
+
+bool friend_connection_mlkem_verified(const Friend_Connections *fr_c, int friendcon_id)
+{
+    const Friend_Conn *const friend_con = get_conn(fr_c, friendcon_id);
+
+    if (friend_con == nullptr) {
+        return false;
+    }
+
+    return friend_con->mlkem_verified;
 }
 
 /** Create new friend_connections instance. */

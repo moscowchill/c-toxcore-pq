@@ -253,7 +253,7 @@ int tox_classical_kdf(
 )
 {
     /* For classical mode, use zero ML-KEM slot */
-    uint8_t zero_mlkem[32] = {0};
+    const uint8_t zero_mlkem[32] = {0};
 
     /* Same KDF but with version byte indicating classical */
     if (session_key == NULL || x25519_shared == NULL) {
@@ -451,6 +451,70 @@ void tox_hybrid_session_clear(Tox_Hybrid_Session *session)
     if (session != NULL) {
         sodium_memzero(session, sizeof(Tox_Hybrid_Session));
     }
+}
+
+/*******************************************************************************
+ * Identity Commitment Functions
+ ******************************************************************************/
+
+int tox_mlkem_commitment(
+    uint8_t commitment[TOX_MLKEM_COMMITMENT_SIZE],
+    const uint8_t mlkem_pk[TOX_MLKEM768_PUBLICKEYBYTES]
+)
+{
+    if (commitment == NULL || mlkem_pk == NULL) {
+        return -1;
+    }
+
+    /* SHA256 hash of ML-KEM public key */
+    uint8_t hash[crypto_hash_sha256_BYTES];
+    if (crypto_hash_sha256(hash, mlkem_pk, TOX_MLKEM768_PUBLICKEYBYTES) != 0) {
+        return -1;
+    }
+
+    /* Take first 8 bytes as commitment */
+    memcpy(commitment, hash, TOX_MLKEM_COMMITMENT_SIZE);
+
+    /* Clear hash from memory */
+    sodium_memzero(hash, sizeof(hash));
+
+    return 0;
+}
+
+bool tox_verify_mlkem_commitment(
+    const uint8_t commitment[TOX_MLKEM_COMMITMENT_SIZE],
+    const uint8_t mlkem_pk[TOX_MLKEM768_PUBLICKEYBYTES]
+)
+{
+    if (commitment == NULL || mlkem_pk == NULL) {
+        return false;
+    }
+
+    /* Compute commitment from the provided public key */
+    uint8_t computed[TOX_MLKEM_COMMITMENT_SIZE];
+    if (tox_mlkem_commitment(computed, mlkem_pk) != 0) {
+        return false;
+    }
+
+    /* Constant-time comparison to prevent timing attacks */
+    bool match = (sodium_memcmp(computed, commitment, TOX_MLKEM_COMMITMENT_SIZE) == 0);
+
+    /* Clear computed commitment from memory */
+    sodium_memzero(computed, sizeof(computed));
+
+    return match;
+}
+
+int tox_hybrid_identity_commitment(
+    uint8_t commitment[TOX_MLKEM_COMMITMENT_SIZE],
+    const Tox_Hybrid_Identity *identity
+)
+{
+    if (commitment == NULL || identity == NULL) {
+        return -1;
+    }
+
+    return tox_mlkem_commitment(commitment, identity->mlkem_public);
 }
 
 /*******************************************************************************

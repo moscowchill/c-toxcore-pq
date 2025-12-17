@@ -655,3 +655,67 @@ endif()
 if (BUILD_FUZZ_TESTS)
   add_subdirectory(testing/fuzzing)
 endif()
+
+################################################################################
+#
+# :: Local lint/analysis targets
+#
+################################################################################
+
+# Find tools
+find_program(CLANG_TIDY_EXE NAMES clang-tidy)
+find_program(CPPCHECK_EXE NAMES cppcheck)
+
+# Collect source files for linting
+set(LINT_SOURCES
+  ${toxcore_SOURCES}
+  ${toxencryptsave_SOURCES}
+)
+
+# clang-tidy target
+if(CLANG_TIDY_EXE)
+  add_custom_target(lint-clang-tidy
+    COMMAND ${CLANG_TIDY_EXE}
+      -p ${CMAKE_BINARY_DIR}
+      --checks=clang-analyzer-*,bugprone-*,performance-*
+      ${CMAKE_SOURCE_DIR}/toxcore/*.c
+    COMMENT "Running clang-tidy..."
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  )
+endif()
+
+# cppcheck target
+if(CPPCHECK_EXE)
+  add_custom_target(lint-cppcheck
+    COMMAND ${CPPCHECK_EXE}
+      --enable=warning,style,performance,portability
+      --suppress=missingIncludeSystem
+      --suppress=unusedFunction
+      --inline-suppr
+      --error-exitcode=1
+      -I ${CMAKE_SOURCE_DIR}/toxcore
+      -I ${CMAKE_SOURCE_DIR}
+      ${CMAKE_SOURCE_DIR}/toxcore/*.c
+      ${CMAKE_SOURCE_DIR}/toxcore/*.h
+    COMMENT "Running cppcheck..."
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  )
+endif()
+
+# Combined lint target
+add_custom_target(lint
+  COMMENT "Running all lint checks..."
+)
+if(TARGET lint-clang-tidy)
+  add_dependencies(lint lint-clang-tidy)
+endif()
+if(TARGET lint-cppcheck)
+  add_dependencies(lint lint-cppcheck)
+endif()
+
+# PQ-specific test target
+add_custom_target(test-pq
+  COMMAND ${CMAKE_CTEST_COMMAND} -R crypto_pq --output-on-failure
+  COMMENT "Running PQ crypto tests..."
+  WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)

@@ -135,6 +135,33 @@ const uint8_t *_Nonnull nc_get_self_public_key(const Net_Crypto *_Nonnull c);
 const uint8_t *_Nonnull nc_get_self_secret_key(const Net_Crypto *_Nonnull c);
 TCP_Connections *_Nonnull nc_get_tcp_c(const Net_Crypto *_Nonnull c);
 
+/** @brief Check if PQ crypto is enabled and available. */
+bool nc_pq_enabled(const Net_Crypto *_Nonnull c);
+
+/**
+ * @brief Get our ML-KEM public key for PQ handshakes.
+ * @return Pointer to ML-KEM public key (TOX_MLKEM768_PUBLICKEYBYTES), or NULL if PQ not enabled.
+ */
+const uint8_t *_Nullable nc_get_self_mlkem_public(const Net_Crypto *_Nonnull c);
+
+/**
+ * @brief Check if a connection is using PQ (post-quantum) cryptography.
+ * @param c Net_Crypto instance
+ * @param crypt_connection_id Connection ID to check
+ * @return true if connection is using hybrid PQ crypto, false otherwise
+ */
+bool nc_connection_is_pq(const Net_Crypto *_Nonnull c, int crypt_connection_id);
+
+/**
+ * @brief Get peer's ML-KEM public key from a connection.
+ * @param c Net_Crypto instance
+ * @param crypt_connection_id Connection ID
+ * @param peer_mlkem_public Output buffer (TOX_MLKEM768_PUBLICKEYBYTES)
+ * @return true if PQ connection and key copied, false otherwise
+ */
+bool nc_get_peer_mlkem_public(const Net_Crypto *_Nonnull c, int crypt_connection_id,
+                              uint8_t peer_mlkem_public[TOX_MLKEM768_PUBLICKEYBYTES]);
+
 typedef struct New_Connection {
     IP_Port source;
     uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE]; /* The real public key of the peer. */

@@ -258,6 +258,35 @@ uint32_t tox_nospam_size(void);
 uint32_t tox_address_size(void);
 
 /**
+ * @brief Size of the ML-KEM commitment in a PQ Tox address.
+ *
+ * The commitment is a truncated SHA-256 hash of the ML-KEM public key,
+ * used for quantum-resistant identity verification.
+ */
+#ifndef TOX_MLKEM_COMMITMENT_SIZE
+#define TOX_MLKEM_COMMITMENT_SIZE      8
+#endif
+
+uint32_t tox_mlkem_commitment_size(void);
+
+/**
+ * @brief The size of a PQ (post-quantum) Tox address in bytes.
+ *
+ * PQ Tox addresses are in the format:
+ * `[Public Key (32 bytes)][ML-KEM commitment (8 bytes)][nospam (4 bytes)][checksum (2 bytes)]`.
+ *
+ * The ML-KEM commitment is SHA256(ML-KEM_public_key)[0:8] and enables
+ * quantum-resistant identity verification during handshake.
+ *
+ * The checksum is computed over the first 44 bytes (Public Key + commitment + nospam).
+ */
+#ifndef TOX_ADDRESS_SIZE_PQ
+#define TOX_ADDRESS_SIZE_PQ            (TOX_PUBLIC_KEY_SIZE + TOX_MLKEM_COMMITMENT_SIZE + TOX_NOSPAM_SIZE + sizeof(uint16_t))
+#endif
+
+uint32_t tox_address_size_pq(void);
+
+/**
  * @brief Maximum length of a nickname in bytes.
  *
  * @deprecated The macro will be removed in 0.3.0. Use the function instead.
@@ -671,6 +700,30 @@ void tox_iterate(Tox *tox, void *user_data);
 void tox_self_get_address(const Tox *tox, uint8_t address[TOX_ADDRESS_SIZE]);
 
 /**
+ * @brief Writes the PQ (post-quantum) Tox friend address of the client to a byte array.
+ *
+ * The PQ address includes an ML-KEM commitment for quantum-resistant identity verification.
+ * Format: [X25519 pubkey (32)][ML-KEM commitment (8)][nospam (4)][checksum (2)] = 46 bytes
+ *
+ * The address is not in human-readable format. If a client wants to display
+ * the address, formatting is required.
+ *
+ * @param address A memory region of at least TOX_ADDRESS_SIZE_PQ bytes. If this
+ *   parameter is NULL, this function has no effect.
+ * @return true if PQ identity is available and address was written, false if
+ *   PQ crypto is not available (use tox_self_get_address instead).
+ * @see TOX_ADDRESS_SIZE_PQ for the address format.
+ */
+bool tox_self_get_address_pq(const Tox *tox, uint8_t address[TOX_ADDRESS_SIZE_PQ]);
+
+/**
+ * @brief Check if this Tox instance has PQ (post-quantum) identity.
+ *
+ * @return true if ML-KEM keypair is available for PQ handshakes.
+ */
+bool tox_self_has_pq_identity(const Tox *tox);
+
+/**
  * @brief Set the 4-byte nospam part of the address.
  *
  * This value is expected in host byte order. I.e. 0x12345678 will form the
@@ -930,6 +983,35 @@ Tox_Friend_Number tox_friend_add(
  */
 Tox_Friend_Number tox_friend_add_norequest(
     Tox *tox, const uint8_t public_key[TOX_PUBLIC_KEY_SIZE], Tox_Err_Friend_Add *error);
+
+/**
+ * @brief Add a friend using a 46-byte post-quantum address.
+ *
+ * This is similar to tox_friend_add, but accepts a 46-byte PQ address that
+ * includes an ML-KEM commitment for quantum-resistant identity verification.
+ *
+ * The PQ address format is:
+ *   [X25519_pk:32][ML-KEM_commit:8][nospam:4][checksum:2] = 46 bytes
+ *
+ * When the friend connects, the ML-KEM commitment is verified against their
+ * actual ML-KEM public key during the handshake. This provides quantum-resistant
+ * identity verification - even a quantum attacker cannot impersonate a friend
+ * whose 46-byte address you possess.
+ *
+ * @param tox The Tox instance.
+ * @param address A 46-byte PQ address. Contains X25519 public key, ML-KEM
+ *   commitment, nospam, and checksum.
+ * @param message The message to send with the friend request.
+ * @param length The length of the message.
+ *
+ * @return the friend number on success, an unspecified value on failure.
+ * @see tox_friend_add for error codes
+ * @see tox_friend_get_identity_status to check verification status after connection
+ */
+Tox_Friend_Number tox_friend_add_pq(
+    Tox *tox, const uint8_t address[TOX_ADDRESS_SIZE_PQ],
+    const uint8_t message[], size_t length,
+    Tox_Err_Friend_Add *error);
 
 typedef enum Tox_Err_Friend_Delete {
 
@@ -1277,6 +1359,82 @@ typedef void tox_friend_connection_status_cb(
  * adding friends, their connection status is initially offline.
  */
 void tox_callback_friend_connection_status(Tox *tox, tox_friend_connection_status_cb *callback);
+
+/**
+ * @brief Identity verification status for quantum-resistant connections.
+ *
+ * This indicates how strongly the friend's identity has been verified:
+ * - CLASSICAL: Using X25519 only (classical Tox client or PQ unavailable)
+ * - PQ_UNVERIFIED: PQ session established but no ML-KEM commitment to verify
+ *   (friend was added with 38-byte classical address)
+ * - PQ_VERIFIED: PQ session with verified ML-KEM commitment
+ *   (friend was added with 46-byte PQ address and commitment matched)
+ *
+ * Security note: PQ_UNVERIFIED connections have quantum-resistant session keys
+ * but the identity could theoretically be spoofed by a quantum attacker who
+ * compromised the X25519 key. PQ_VERIFIED provides full quantum resistance.
+ */
+typedef enum Tox_Connection_Identity {
+    /**
+     * Friend is not currently connected.
+     */
+    TOX_CONNECTION_IDENTITY_UNKNOWN,
+
+    /**
+     * Connected using classical X25519 cryptography only.
+     * Session is NOT quantum-resistant.
+     */
+    TOX_CONNECTION_IDENTITY_CLASSICAL,
+
+    /**
+     * Connected using hybrid PQ cryptography, but identity not quantum-verified.
+     * Session keys are quantum-resistant, but friend was added with classical
+     * 38-byte address so ML-KEM commitment could not be verified.
+     */
+    TOX_CONNECTION_IDENTITY_PQ_UNVERIFIED,
+
+    /**
+     * Connected using hybrid PQ cryptography with verified ML-KEM commitment.
+     * Full quantum-resistant identity verification. Friend was added with
+     * 46-byte PQ address and the commitment was successfully verified.
+     */
+    TOX_CONNECTION_IDENTITY_PQ_VERIFIED,
+} Tox_Connection_Identity;
+
+const char *tox_connection_identity_to_string(Tox_Connection_Identity value);
+
+/**
+ * @brief Query the identity verification status of a friend connection.
+ *
+ * This indicates the level of quantum resistance for the friend's identity:
+ * - UNKNOWN: Not connected
+ * - CLASSICAL: X25519 only (no PQ protection)
+ * - PQ_UNVERIFIED: PQ session but identity not quantum-verified
+ * - PQ_VERIFIED: Full PQ identity verification
+ *
+ * @param friend_number The friend number to query.
+ * @return The friend's identity verification status.
+ */
+Tox_Connection_Identity tox_friend_get_identity_status(
+    const Tox *tox, Tox_Friend_Number friend_number, Tox_Err_Friend_Query *error);
+
+/**
+ * @param friend_number The friend number whose identity status changed.
+ * @param identity_status The new identity verification status.
+ */
+typedef void tox_friend_identity_status_cb(
+    Tox *tox, Tox_Friend_Number friend_number, Tox_Connection_Identity identity_status, void *user_data);
+
+/**
+ * @brief Set the callback for the `friend_identity_status` event.
+ *
+ * Pass NULL to unset.
+ *
+ * This event is triggered when a friend's identity verification status changes,
+ * typically after PQ handshake completion or when switching between PQ and
+ * classical connections.
+ */
+void tox_callback_friend_identity_status(Tox *tox, tox_friend_identity_status_cb *callback);
 
 /**
  * @brief Check whether a friend is currently typing a message.

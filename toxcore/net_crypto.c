@@ -202,6 +202,61 @@ TCP_Connections *nc_get_tcp_c(const Net_Crypto *c)
     return c->tcp_c;
 }
 
+bool nc_pq_enabled(const Net_Crypto *c)
+{
+    return c->pq_enabled;
+}
+
+const uint8_t *nc_get_self_mlkem_public(const Net_Crypto *c)
+{
+    if (!c->pq_enabled) {
+        return NULL;
+    }
+    return c->self_mlkem_public;
+}
+
+bool nc_connection_is_pq(const Net_Crypto *c, int crypt_connection_id)
+{
+    if ((uint32_t)crypt_connection_id >= c->crypto_connections_length) {
+        return false;
+    }
+
+    if (c->crypto_connections == NULL) {
+        return false;
+    }
+
+    const Crypto_Connection *conn = &c->crypto_connections[crypt_connection_id];
+    if (conn->status == CRYPTO_CONN_NO_CONNECTION) {
+        return false;
+    }
+
+    return conn->session_is_hybrid;
+}
+
+bool nc_get_peer_mlkem_public(const Net_Crypto *c, int crypt_connection_id,
+                              uint8_t peer_mlkem_public[TOX_MLKEM768_PUBLICKEYBYTES])
+{
+    if ((uint32_t)crypt_connection_id >= c->crypto_connections_length) {
+        return false;
+    }
+
+    if (c->crypto_connections == NULL) {
+        return false;
+    }
+
+    const Crypto_Connection *conn = &c->crypto_connections[crypt_connection_id];
+    if (conn->status == CRYPTO_CONN_NO_CONNECTION) {
+        return false;
+    }
+
+    if (!conn->session_is_hybrid) {
+        return false;
+    }
+
+    memcpy(peer_mlkem_public, conn->peer_mlkem_public, TOX_MLKEM768_PUBLICKEYBYTES);
+    return true;
+}
+
 static bool crypt_connection_id_is_valid(const Net_Crypto *_Nonnull c, int crypt_connection_id)
 {
     if ((uint32_t)crypt_connection_id >= c->crypto_connections_length) {

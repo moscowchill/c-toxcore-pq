@@ -173,4 +173,38 @@ const IP_Port *_Nullable friend_conn_get_dht_ip_port(const Friend_Conn *_Nonnull
 int friend_connection_set_pq_capability(Friend_Connections *_Nonnull fr_c, int friendcon_id,
                                          const uint8_t *_Nonnull peer_mlkem_public);
 
+/** @brief Set ML-KEM commitment for identity verification.
+ *
+ * Call this when adding a friend with a 46-byte PQ address.
+ * The commitment will be verified against the peer's ML-KEM public key
+ * during handshake.
+ *
+ * @param fr_c Friend connections context
+ * @param friendcon_id Friend connection ID
+ * @param commitment ML-KEM commitment (TOX_MLKEM_COMMITMENT_SIZE bytes)
+ *
+ * @retval -1 on failure
+ * @retval 0 on success
+ */
+int friend_connection_set_mlkem_commitment(Friend_Connections *_Nonnull fr_c, int friendcon_id,
+                                            const uint8_t commitment[TOX_MLKEM_COMMITMENT_SIZE]);
+
+/** @brief Check if friend connection has ML-KEM commitment set.
+ *
+ * @param fr_c Friend connections context
+ * @param friendcon_id Friend connection ID
+ *
+ * @return true if commitment was set (friend added with 46-byte address)
+ */
+bool friend_connection_has_mlkem_commitment(const Friend_Connections *_Nonnull fr_c, int friendcon_id);
+
+/** @brief Check if ML-KEM commitment was verified for this connection.
+ *
+ * @param fr_c Friend connections context
+ * @param friendcon_id Friend connection ID
+ *
+ * @return true if commitment was verified during handshake
+ */
+bool friend_connection_mlkem_verified(const Friend_Connections *_Nonnull fr_c, int friendcon_id);
+
 #endif /* C_TOXCORE_TOXCORE_FRIEND_CONNECTION_H */

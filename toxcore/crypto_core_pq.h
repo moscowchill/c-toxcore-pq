@@ -37,6 +37,27 @@ extern "C" {
 /** Session key size (output of KDF) */
 #define TOX_SESSION_KEY_BYTES       32
 
+/**
+ * ML-KEM commitment size for identity binding (SHA256 truncated).
+ * Note: Also defined in tox.h for public API. Use ifndef to avoid redefinition.
+ */
+#ifndef TOX_MLKEM_COMMITMENT_SIZE
+#define TOX_MLKEM_COMMITMENT_SIZE   8
+#endif
+
+/**
+ * PQ Tox address sizes.
+ * Classical: [X25519:32][nospam:4][checksum:2] = 38 bytes
+ * PQ:        [X25519:32][MLKEM_commit:8][nospam:4][checksum:2] = 46 bytes
+ * Note: TOX_ADDRESS_SIZE_PQ also defined in tox.h for public API.
+ */
+#ifndef TOX_ADDRESS_SIZE_CLASSICAL
+#define TOX_ADDRESS_SIZE_CLASSICAL  38
+#endif
+#ifndef TOX_ADDRESS_SIZE_PQ
+#define TOX_ADDRESS_SIZE_PQ         46
+#endif
+
 /*******************************************************************************
  * Data Structures
  ******************************************************************************/
@@ -249,6 +270,52 @@ int tox_hybrid_session_respond(
  * @param session Session to clear
  */
 void tox_hybrid_session_clear(Tox_Hybrid_Session *session);
+
+/*******************************************************************************
+ * Identity Commitment Functions
+ ******************************************************************************/
+
+/**
+ * Generate ML-KEM commitment for identity binding.
+ * Commitment = SHA256(mlkem_public_key)[0:8]
+ *
+ * This commitment is included in the 46-byte PQ Tox address to provide
+ * quantum-resistant identity verification. During handshake, the peer's
+ * ML-KEM public key is verified against this commitment.
+ *
+ * @param commitment Output buffer (TOX_MLKEM_COMMITMENT_SIZE bytes)
+ * @param mlkem_pk ML-KEM-768 public key (TOX_MLKEM768_PUBLICKEYBYTES bytes)
+ * @return 0 on success, -1 on failure
+ */
+int tox_mlkem_commitment(
+    uint8_t commitment[TOX_MLKEM_COMMITMENT_SIZE],
+    const uint8_t mlkem_pk[TOX_MLKEM768_PUBLICKEYBYTES]
+);
+
+/**
+ * Verify ML-KEM commitment against a public key.
+ * Uses constant-time comparison to prevent timing attacks.
+ *
+ * @param commitment Expected commitment from Tox address
+ * @param mlkem_pk ML-KEM public key received during handshake
+ * @return true if commitment matches, false otherwise
+ */
+bool tox_verify_mlkem_commitment(
+    const uint8_t commitment[TOX_MLKEM_COMMITMENT_SIZE],
+    const uint8_t mlkem_pk[TOX_MLKEM768_PUBLICKEYBYTES]
+);
+
+/**
+ * Generate commitment from a hybrid identity.
+ *
+ * @param commitment Output buffer (TOX_MLKEM_COMMITMENT_SIZE bytes)
+ * @param identity Hybrid identity containing ML-KEM keypair
+ * @return 0 on success, -1 on failure
+ */
+int tox_hybrid_identity_commitment(
+    uint8_t commitment[TOX_MLKEM_COMMITMENT_SIZE],
+    const Tox_Hybrid_Identity *identity
+);
 
 /*******************************************************************************
  * Utility Functions

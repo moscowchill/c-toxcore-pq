@@ -42,6 +42,14 @@ uint32_t tox_address_size(void)
 {
     return TOX_ADDRESS_SIZE;
 }
+uint32_t tox_mlkem_commitment_size(void)
+{
+    return TOX_MLKEM_COMMITMENT_SIZE;
+}
+uint32_t tox_address_size_pq(void)
+{
+    return TOX_ADDRESS_SIZE_PQ;
+}
 uint32_t tox_max_name_length(void)
 {
     return TOX_MAX_NAME_LENGTH;
@@ -264,6 +272,24 @@ const char *tox_connection_to_string(Tox_Connection value)
     }
 
     return "<invalid Tox_Connection>";
+}
+const char *tox_connection_identity_to_string(Tox_Connection_Identity value)
+{
+    switch (value) {
+        case TOX_CONNECTION_IDENTITY_UNKNOWN:
+            return "TOX_CONNECTION_IDENTITY_UNKNOWN";
+
+        case TOX_CONNECTION_IDENTITY_CLASSICAL:
+            return "TOX_CONNECTION_IDENTITY_CLASSICAL";
+
+        case TOX_CONNECTION_IDENTITY_PQ_UNVERIFIED:
+            return "TOX_CONNECTION_IDENTITY_PQ_UNVERIFIED";
+
+        case TOX_CONNECTION_IDENTITY_PQ_VERIFIED:
+            return "TOX_CONNECTION_IDENTITY_PQ_VERIFIED";
+    }
+
+    return "<invalid Tox_Connection_Identity>";
 }
 const char *tox_err_set_info_to_string(Tox_Err_Set_Info value)
 {
