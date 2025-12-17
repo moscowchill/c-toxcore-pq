@@ -14,6 +14,7 @@ apt-get install -y \
   ca-certificates \
   cmake \
   curl \
+  git \
   libc-dev \
   libtool \
   make \

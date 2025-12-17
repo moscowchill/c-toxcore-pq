@@ -12,13 +12,18 @@ ARG VERSION_OPUS=1.4 \
     SUPPORT_TEST=false \
     SUPPORT_ARCH_i686=true \
     SUPPORT_ARCH_x86_64=true \
-    CROSS_COMPILE=true
+    CROSS_COMPILE=true \
+    ENABLE_PQ=true
+
+# Note: ENABLE_PQ=true builds libsodium from git master for ML-KEM-768 support
+# Set ENABLE_PQ=false to use stable libsodium 1.0.19 (no PQ crypto)
 
 # Make those available when running the container
 ENV SUPPORT_TEST=${SUPPORT_TEST} \
     SUPPORT_ARCH_i686=${SUPPORT_ARCH_i686} \
     SUPPORT_ARCH_x86_64=${SUPPORT_ARCH_x86_64} \
-    CROSS_COMPILE=${CROSS_COMPILE}
+    CROSS_COMPILE=${CROSS_COMPILE} \
+    ENABLE_PQ=${ENABLE_PQ}
 
 WORKDIR /work
 COPY check_sha256.sh .

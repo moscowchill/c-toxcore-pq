@@ -41,19 +41,54 @@ build() {
     " >windows_toolchain.cmake
 
   echo
-  echo "=== Building Sodium $VERSION_SODIUM $ARCH ==="
-  curl "${CURL_OPTIONS[@]}" -O "https://github.com/jedisct1/libsodium/releases/download/$VERSION_SODIUM-RELEASE/libsodium-$VERSION_SODIUM.tar.gz"
-  check_sha256 "018d79fe0a045cca07331d37bd0cb57b2e838c51bc48fd837a1472e50068bbea" "libsodium-$VERSION_SODIUM.tar.gz"
-  tar -xf "libsodium-$VERSION_SODIUM.tar.gz"
-  cd "libsodium-stable"
-  ./configure \
-    --host="$WINDOWS_TOOLCHAIN" \
-    --prefix="$PREFIX_DIR" \
-    --disable-shared \
-    --enable-static
-  make
-  make install
-  cd ..
+  if [ "$ENABLE_PQ" = "true" ]; then
+    # Build libsodium from git master for ML-KEM-768 (post-quantum) support
+    # The stable release (1.0.19) doesn't include ML-KEM yet
+    echo "=== Building Sodium (git master with ML-KEM) $ARCH ==="
+
+    if [ ! -d "libsodium-pq" ]; then
+      git clone https://github.com/jedisct1/libsodium.git libsodium-pq
+    fi
+    cd libsodium-pq
+    git fetch origin
+    git checkout master
+    git pull origin master
+
+    ./autogen.sh
+    ./configure \
+      --host="$WINDOWS_TOOLCHAIN" \
+      --prefix="$PREFIX_DIR" \
+      --disable-shared \
+      --enable-static
+    make
+    make install
+
+    # Verify ML-KEM symbols are present
+    if ! grep -q "crypto_kem_mlkem768" "$PREFIX_DIR/include/sodium.h" 2>/dev/null; then
+      echo "ERROR: libsodium was built but ML-KEM-768 support is missing!"
+      echo "The current libsodium master may not include ML-KEM yet."
+      echo "Check https://github.com/jedisct1/libsodium for ML-KEM status."
+      exit 1
+    fi
+    echo "✓ ML-KEM-768 support verified in libsodium"
+
+    cd ..
+  else
+    # Use stable libsodium release (no PQ crypto)
+    echo "=== Building Sodium $VERSION_SODIUM $ARCH ==="
+    curl "${CURL_OPTIONS[@]}" -O "https://github.com/jedisct1/libsodium/releases/download/$VERSION_SODIUM-RELEASE/libsodium-$VERSION_SODIUM.tar.gz"
+    check_sha256 "018d79fe0a045cca07331d37bd0cb57b2e838c51bc48fd837a1472e50068bbea" "libsodium-$VERSION_SODIUM.tar.gz"
+    tar -xf "libsodium-$VERSION_SODIUM.tar.gz"
+    cd "libsodium-stable"
+    ./configure \
+      --host="$WINDOWS_TOOLCHAIN" \
+      --prefix="$PREFIX_DIR" \
+      --disable-shared \
+      --enable-static
+    make
+    make install
+    cd ..
+  fi
 
   echo
   echo "=== Building Opus $VERSION_OPUS $ARCH ==="

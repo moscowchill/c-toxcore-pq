@@ -300,15 +300,16 @@ Get the toxcore source code and navigate to `other/docker/windows`.
 Build the container image based on the Dockerfile. The following options are
 available to customize the building of the container image.
 
-| Name                       | Description                                           | Expected Value                      | Default Value |
-| -------------------------- | ----------------------------------------------------- | ----------------------------------- | ------------- |
-| `SUPPORT_ARCH_i686`        | Support building 32-bit toxcore.                      | "true" or "false" (case sensitive). | true          |
-| `SUPPORT_ARCH_x86_64`      | Support building 64-bit toxcore.                      | "true" or "false" (case sensitive). | true          |
-| `SUPPORT_TEST`             | Support running toxcore automated tests.              | "true" or "false" (case sensitive). | false         |
-| `VERSION_OPUS`             | Version of libopus to build toxcore with.             | Numeric version number.             | 1.4           |
-| `VERSION_SODIUM`           | Version of libsodium to build toxcore with.           | Numeric version number.             | 1.0.19        |
-| `VERSION_VPX`              | Version of libvpx to build toxcore with.              | Numeric version number.             | 1.14.0        |
-| `ENABLE_HASH_VERIFICATION` | Verify the hashes of the default dependency versions. | "true" or "false" (case sensitive). | true          |
+| Name                       | Description                                                                      | Expected Value                      | Default Value |
+| -------------------------- | -------------------------------------------------------------------------------- | ----------------------------------- | ------------- |
+| `SUPPORT_ARCH_i686`        | Support building 32-bit toxcore.                                                 | "true" or "false" (case sensitive). | true          |
+| `SUPPORT_ARCH_x86_64`      | Support building 64-bit toxcore.                                                 | "true" or "false" (case sensitive). | true          |
+| `SUPPORT_TEST`             | Support running toxcore automated tests.                                         | "true" or "false" (case sensitive). | false         |
+| `ENABLE_PQ`                | Build with ML-KEM-768 post-quantum crypto (requires libsodium from git master).  | "true" or "false" (case sensitive). | true          |
+| `VERSION_OPUS`             | Version of libopus to build toxcore with.                                        | Numeric version number.             | 1.4           |
+| `VERSION_SODIUM`           | Version of libsodium to build toxcore with (ignored if ENABLE_PQ=true).          | Numeric version number.             | 1.0.19        |
+| `VERSION_VPX`              | Version of libvpx to build toxcore with.                                         | Numeric version number.             | 1.14.0        |
+| `ENABLE_HASH_VERIFICATION` | Verify the hashes of the default dependency versions (ignored if ENABLE_PQ=true).| "true" or "false" (case sensitive). | true          |
 
 Example of building a container image with options
 
@@ -317,6 +318,16 @@ cd other/docker/windows
 docker build \
   --build-arg SUPPORT_TEST=true \
   -t toxcore \
+  .
+```
+
+Example of building with post-quantum crypto disabled (uses stable libsodium)
+
+```sh
+cd other/docker/windows
+docker build \
+  --build-arg ENABLE_PQ=false \
+  -t toxcore-classical \
   .
 ```
 
