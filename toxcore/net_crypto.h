@@ -14,6 +14,7 @@
 #include "TCP_connection.h"
 #include "attributes.h"
 #include "crypto_core.h"
+#include "crypto_core_pq.h"
 #include "logger.h"
 #include "mem.h"
 #include "mono_time.h"
@@ -84,13 +85,20 @@ typedef enum Packet_Id {
 /** Minimum packet queue max length. */
 #define CRYPTO_MIN_QUEUE_LENGTH 64
 
-/** Maximum total size of packets that net_crypto sends. */
-#define MAX_CRYPTO_PACKET_SIZE (uint16_t)1400
+/** Maximum total size of packets that net_crypto can receive.
+ * Set to 1500 to accommodate ML-KEM-768 hybrid handshakes (up to 1474 bytes).
+ */
+#define MAX_CRYPTO_PACKET_SIZE (uint16_t)1500
+
+/** Maximum size of crypto DATA packets (excludes handshake packets).
+ * Kept at 1400 to preserve original message size limits and avoid fragmentation.
+ */
+#define MAX_CRYPTO_DATA_PACKET_SIZE (uint16_t)1400
 
 #define CRYPTO_DATA_PACKET_MIN_SIZE (uint16_t)(1 + sizeof(uint16_t) + (sizeof(uint32_t) + sizeof(uint32_t)) + CRYPTO_MAC_SIZE)
 
-/** Max size of data in packets */
-#define MAX_CRYPTO_DATA_SIZE (uint16_t)(MAX_CRYPTO_PACKET_SIZE - CRYPTO_DATA_PACKET_MIN_SIZE)
+/** Max size of data payload in data packets (derived from DATA packet size, not overall packet size) */
+#define MAX_CRYPTO_DATA_SIZE (uint16_t)(MAX_CRYPTO_DATA_PACKET_SIZE - CRYPTO_DATA_PACKET_MIN_SIZE)
 
 /** Interval in ms between sending cookie request/handshake packets. */
 #define CRYPTO_SEND_PACKET_INTERVAL 1000
@@ -135,6 +143,11 @@ typedef struct New_Connection {
     uint8_t peersessionpublic_key[CRYPTO_PUBLIC_KEY_SIZE]; /* The public key of the peer. */
     uint8_t *_Nullable cookie;
     uint8_t cookie_length;
+
+    /* Post-quantum hybrid fields */
+    bool is_hybrid;  /* True if peer used hybrid handshake */
+    uint8_t mlkem_ciphertext[TOX_MLKEM768_CIPHERTEXTBYTES];  /* ML-KEM ciphertext from initiator */
+    uint8_t mlkem_shared[TOX_MLKEM768_SHAREDSECRETBYTES];    /* Decapsulated shared secret */
 } New_Connection;
 
 typedef int connection_status_cb(void *_Nonnull object, int id, bool status, void *_Nullable userdata);
@@ -165,6 +178,23 @@ int accept_crypto_connection(Net_Crypto *_Nonnull c, const New_Connection *_Nonn
  * return connection id on success.
  */
 int new_crypto_connection(Net_Crypto *_Nonnull c, const uint8_t *_Nonnull real_public_key, const uint8_t *_Nonnull dht_public_key);
+
+/** @brief Create a crypto connection with optional PQ capability.
+ *
+ * If peer_mlkem_public is non-NULL, the peer is PQ-capable and we'll use
+ * hybrid key exchange. If NULL, we fall back to classical.
+ *
+ * @param c Net_Crypto context
+ * @param real_public_key Peer's X25519 identity public key (32 bytes)
+ * @param dht_public_key Peer's DHT public key (32 bytes)
+ * @param peer_mlkem_public Peer's ML-KEM-768 public key (1184 bytes) or NULL
+ *
+ * return -1 on failure.
+ * return connection id on success.
+ */
+int new_crypto_connection_pq(Net_Crypto *_Nonnull c, const uint8_t *_Nonnull real_public_key,
+                              const uint8_t *_Nonnull dht_public_key,
+                              const uint8_t *_Nullable peer_mlkem_public);
 
 /** @brief Set the direct ip of the crypto connection.
  *

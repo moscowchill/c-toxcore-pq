@@ -1,722 +1,269 @@
-# Protocol Negotiation via ToxExt
+# Protocol Negotiation via In-Band Capability Signaling
 
 ## Overview
 
-ToxExt is the extension negotiation framework for Tox, allowing clients to advertise and negotiate optional capabilities. We use ToxExt to negotiate PQ support without breaking compatibility with legacy clients.
+PQ capability negotiation in aqTox-PQ uses **in-band signaling** during the initial handshake, rather than a separate negotiation phase. This approach:
 
-## ToxExt Basics
+1. Minimizes protocol changes
+2. Works without ToxExt dependency
+3. Enables PQ key exchange on first connection
+4. Maintains backwards compatibility with legacy clients
 
-### How ToxExt Works
+## Design Rationale
 
-1. Extensions register with unique IDs (UUIDs)
-2. After friend connection established, clients exchange supported extensions
-3. Extensions can send custom lossless packets (types 160-191)
-4. Legacy clients ignore unknown extensions gracefully
+### Why Not ToxExt?
 
-### Current ToxExt Flow
+The original design considered ToxExt for capability negotiation. However, in-band signaling was chosen because:
 
-```
-Alice                                               Bob
------                                               ---
-        ─── Friend Connection Established ───►
-        
-        ◄── Extension Negotiation ───►
-        
-        Each side advertises supported extensions
-        Only use extensions both sides support
-```
+1. **Simplicity**: No additional framework dependency
+2. **Efficiency**: PQ handshake happens immediately, no extra round-trip
+3. **Compatibility**: Works with existing connection flow
+4. **Minimal Changes**: Reuses existing packet types with minor extensions
 
-## PQ Capability Extension
+### Trade-offs
 
-### Extension Registration
+| Aspect | In-Band Approach | ToxExt Approach |
+|--------|------------------|-----------------|
+| Complexity | Lower | Higher |
+| Round-trips | Same as classical | +1 for negotiation |
+| Future algorithms | Harder to add | Easier to extend |
+| Downgrade protection | Via packet format | Via signed commitments |
+
+## In-Band Capability Signaling
+
+### PQ Capability Marker
+
+PQ capability is signaled via a marker byte in the cookie request padding field:
 
 ```c
-// toxext_pq.h
-
-#define TOXEXT_PQ_UUID "aqtox-pq-hybrid-v1"
-
-// Extension packet types (within ToxExt custom packet range)
-#define TOXEXT_PQ_CAPABILITY_ANNOUNCE  0x01
-#define TOXEXT_PQ_CAPABILITY_ACK       0x02
-#define TOXEXT_PQ_CAPABILITY_REJECT    0x03
-#define TOXEXT_PQ_KEY_UPDATE           0x04
-
-// Supported algorithms (bitmasks)
-#define TOXEXT_PQ_KEM_MLKEM768         (1 << 0)
-#define TOXEXT_PQ_KEM_MLKEM1024        (1 << 1)  // Future
-#define TOXEXT_PQ_SIG_MLDSA65          (1 << 0)  // Future
-#define TOXEXT_PQ_SIG_MLDSA87          (1 << 1)  // Future
-
-// Extension structure
-typedef struct ToxExtPQ {
-    uint8_t  extension_uuid[16];
-    uint16_t version;
-    
-    // Our capabilities
-    uint16_t our_supported_kems;
-    uint16_t our_supported_sigs;
-    
-    // Peer capabilities (learned via negotiation)
-    uint16_t peer_supported_kems;
-    uint16_t peer_supported_sigs;
-    
-    // Negotiated common capabilities
-    uint16_t negotiated_kem;
-    uint16_t negotiated_sig;
-    
-    // State
-    bool negotiation_complete;
-    bool peer_pq_capable;
-    
-    // Callbacks
-    void (*on_capability_received)(uint32_t friend_number, uint16_t kems, uint16_t sigs);
-    void (*on_negotiation_complete)(uint32_t friend_number, bool pq_enabled);
-} ToxExtPQ;
+#define PQ_CAPABILITY_MARKER 0x02
+#define PQ_CAPABILITY_OFFSET (CRYPTO_PUBLIC_KEY_SIZE)  /* Position 32 in plaintext */
 ```
 
-### Extension Lifecycle
+### Cookie Request with PQ Marker
+
+The cookie request uses the **classical format** with a PQ capability marker embedded in the padding:
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    ToxExt PQ Extension Lifecycle                    │
-└─────────────────────────────────────────────────────────────────────┘
-
-1. INITIALIZATION
-   ┌─────────────────────────────────────────────────────────────────┐
-   │ toxext_pq_init()                                                │
-   │   - Register with ToxExt framework                              │
-   │   - Set our capabilities (ML-KEM-768)                           │
-   │   - Register packet handlers                                    │
-   └─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-2. FRIEND CONNECTS
-   ┌─────────────────────────────────────────────────────────────────┐
-   │ on_friend_connection_status()                                   │
-   │   - If connected, start capability exchange                     │
-   │   - Send CAPABILITY_ANNOUNCE                                    │
-   └─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-3. CAPABILITY EXCHANGE
-   ┌─────────────────────────────────────────────────────────────────┐
-   │ Both peers send their capabilities                              │
-   │ Process received capabilities                                   │
-   │ Compute intersection → negotiated capabilities                  │
-   │ Send CAPABILITY_ACK with agreed set                             │
-   └─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-4. HANDSHAKE UPGRADE (if both support PQ)
-   ┌─────────────────────────────────────────────────────────────────┐
-   │ Trigger session rekeying with hybrid handshake                  │
-   │ Or: Mark peer as PQ-capable for next session                    │
-   └─────────────────────────────────────────────────────────────────┘
-```
-
-### Packet Formats
-
-#### CAPABILITY_ANNOUNCE (0x01)
-
-Sent immediately after ToxExt negotiation confirms both sides have PQ extension:
-
-```
-+--------+--------+--------+------------------+------------------+
-| type   | version| flags  | supported_kems   | supported_sigs   |
-| (1)    | (2)    | (2)    | (2)              | (2)              |
-+--------+--------+--------+------------------+------------------+
-| 0x01   | 0x0001 |        | bitmask          | bitmask          |
-+--------+--------+--------+------------------+------------------+
-
+Cookie Request Plaintext (before encryption):
 +------------------+------------------+------------------+
-| mlkem_pubkey     | timestamp        | signature        |
-| (1184 bytes)     | (8 bytes)        | (64 bytes)       |
+| sender_real_pk   | request_number   | padding          |
+| (32 bytes)       | (8 bytes)        | (24 bytes)       |
 +------------------+------------------+------------------+
-| Our ML-KEM       | Unix timestamp   | Ed25519 sig      |
-| public key       | (monotonic)      | over all above   |
-+------------------+------------------+------------------+
-
-Total: 1265 bytes
+                                      ^
+                                      | PQ marker at first byte of padding
+                                      | 0x02 = PQ capable
+                                      | 0x00 = Classical only
 ```
 
-#### CAPABILITY_ACK (0x02)
+### Detection Logic
 
-Confirms negotiated capabilities:
-
-```
-+--------+--------+------------------+------------------+
-| type   | flags  | negotiated_kem   | negotiated_sig   |
-| (1)    | (2)    | (2)              | (2)              |
-+--------+--------+------------------+------------------+
-| 0x02   |        | single value     | single value     |
-+--------+--------+------------------+------------------+
-
-+------------------+
-| signature        |
-| (64 bytes)       |
-+------------------+
-| Ed25519 sig      |
-+------------------+
-
-Total: 71 bytes
-```
-
-#### CAPABILITY_REJECT (0x03)
-
-If capabilities don't intersect or policy disallows:
-
-```
-+--------+--------+------------------+
-| type   | reason | reserved         |
-| (1)    | (2)    | (8 bytes)        |
-+--------+--------+------------------+
-| 0x03   | code   |                  |
-+--------+--------+------------------+
-
-Reason codes:
-  0x0001 - No common algorithms
-  0x0002 - Policy requires PQ (can't fallback)
-  0x0003 - Version mismatch
-  0x0004 - Invalid signature
-```
-
-#### KEY_UPDATE (0x04)
-
-For periodic key rotation (optional enhancement):
-
-```
-+--------+------------------+------------------+------------------+
-| type   | new_mlkem_pubkey | timestamp        | signature        |
-| (1)    | (1184 bytes)     | (8 bytes)        | (64 bytes)       |
-+--------+------------------+------------------+------------------+
-| 0x04   |                  |                  |                  |
-+--------+------------------+------------------+------------------+
-```
-
-## Implementation
-
-### Extension Registration
+When a PQ-enabled node receives a cookie request:
 
 ```c
-// toxext_pq.c
-
-#include "toxext_pq.h"
-#include <toxext/toxext.h>
-
-static ToxExtPQ *g_pq_ext = NULL;
-
-// Extension UUID (must be unique)
-static const uint8_t PQ_EXTENSION_UUID[16] = {
-    0xa0, 0x1b, 0x2c, 0x3d, 0x4e, 0x5f, 0x60, 0x71,
-    0x82, 0x93, 0xa4, 0xb5, 0xc6, 0xd7, 0xe8, 0xf9
-};
-
-/**
- * Initialize PQ extension and register with ToxExt.
- */
-int toxext_pq_init(Tox *tox, ToxExt *toxext) {
-    g_pq_ext = calloc(1, sizeof(ToxExtPQ));
-    if (g_pq_ext == NULL) {
-        return -1;
-    }
-    
-    memcpy(g_pq_ext->extension_uuid, PQ_EXTENSION_UUID, 16);
-    g_pq_ext->version = 0x0001;
-    g_pq_ext->our_supported_kems = TOXEXT_PQ_KEM_MLKEM768;
-    g_pq_ext->our_supported_sigs = 0;  // Not yet implemented
-    
-    // Register extension with ToxExt
-    struct ToxExtExtension ext = {
-        .uuid = PQ_EXTENSION_UUID,
-        .uuid_size = 16,
-        .recv_callback = toxext_pq_recv_callback,
-        .negotiate_callback = toxext_pq_negotiate_callback,
-        .userdata = g_pq_ext
-    };
-    
-    if (toxext_register_extension(toxext, &ext) != 0) {
-        free(g_pq_ext);
-        return -1;
-    }
-    
-    return 0;
-}
-
-/**
- * Called when ToxExt negotiation completes with a friend.
- */
-static void toxext_pq_negotiate_callback(
-    uint32_t friend_number,
-    bool extension_supported,
-    void *userdata
-) {
-    ToxExtPQ *pq = (ToxExtPQ *)userdata;
-    
-    if (extension_supported) {
-        // Peer has PQ extension, send our capabilities
-        toxext_pq_send_capability_announce(friend_number);
-    } else {
-        // Peer doesn't have PQ extension
-        pq->peer_pq_capable = false;
-        pq->negotiation_complete = true;
-        
-        if (pq->on_negotiation_complete) {
-            pq->on_negotiation_complete(friend_number, false);
-        }
-    }
-}
-
-/**
- * Handle incoming PQ extension packets.
- */
-static void toxext_pq_recv_callback(
-    uint32_t friend_number,
-    const uint8_t *data,
-    size_t length,
-    void *userdata
-) {
-    if (length < 1) return;
-    
-    ToxExtPQ *pq = (ToxExtPQ *)userdata;
-    uint8_t packet_type = data[0];
-    
-    switch (packet_type) {
-        case TOXEXT_PQ_CAPABILITY_ANNOUNCE:
-            toxext_pq_handle_announce(pq, friend_number, data + 1, length - 1);
-            break;
-            
-        case TOXEXT_PQ_CAPABILITY_ACK:
-            toxext_pq_handle_ack(pq, friend_number, data + 1, length - 1);
-            break;
-            
-        case TOXEXT_PQ_CAPABILITY_REJECT:
-            toxext_pq_handle_reject(pq, friend_number, data + 1, length - 1);
-            break;
-            
-        case TOXEXT_PQ_KEY_UPDATE:
-            toxext_pq_handle_key_update(pq, friend_number, data + 1, length - 1);
-            break;
-            
-        default:
-            // Unknown packet type, ignore
-            break;
-    }
+/* In udp_handle_cookie_request() */
+if (c->pq_enabled && request_plain[PQ_CAPABILITY_OFFSET] == PQ_CAPABILITY_MARKER) {
+    /* Peer is PQ capable - send hybrid cookie response */
+    return send_hybrid_cookie_response(...);
+} else {
+    /* Peer is classical - send classical cookie response */
+    return send_classical_cookie_response(...);
 }
 ```
 
-### Capability Announcement
+## Handshake Flow
+
+### PQ ↔ PQ Connection (Both Peers PQ-Capable)
+
+```
+Alice (PQ)                                              Bob (PQ)
+---------                                               -------
+
+1. Cookie Request (classical format with PQ marker)
+   [0x18][dht_pk][nonce][encrypted:{real_pk|number|0x02|padding}]
+   ────────────────────────────────────────────────────────────►
+
+2. Hybrid Cookie Response (includes Bob's ML-KEM public key)
+   [0x19][0x02][nonce][encrypted:{cookie|number|mlkem_pk(1184)}]
+   ◄────────────────────────────────────────────────────────────
+
+3. Hybrid Handshake (Alice encapsulates to Bob's ML-KEM key)
+   [0x1a][0x02][cookie][mlkem_ct(1088)][nonce][encrypted_hs]
+   ────────────────────────────────────────────────────────────►
+
+4. Classical Handshake Response (Bob decapsulated, uses hybrid KDF)
+   [0x1a][random_byte][cookie][nonce][encrypted_hs]
+   ◄────────────────────────────────────────────────────────────
+
+5. Session Established with Hybrid Security
+   shared_key = HKDF(X25519_shared || ML-KEM_shared)
+```
+
+### PQ → Classical Connection (Legacy Peer)
+
+```
+Alice (PQ)                                              Bob (Classical)
+---------                                               --------------
+
+1. Cookie Request (with PQ marker - ignored by Bob)
+   [0x18][dht_pk][nonce][encrypted:{real_pk|number|0x02|padding}]
+   ────────────────────────────────────────────────────────────►
+
+2. Classical Cookie Response (no ML-KEM key)
+   [0x19][nonce][encrypted:{cookie|number}]
+   ◄────────────────────────────────────────────────────────────
+
+3. Classical Handshake
+   [0x1a][cookie][nonce][encrypted_hs]
+   ────────────────────────────────────────────────────────────►
+
+4. Classical Handshake Response
+   [0x1a][cookie][nonce][encrypted_hs]
+   ◄────────────────────────────────────────────────────────────
+
+5. Session Established with Classical Security
+   shared_key = X25519_shared (legacy derivation)
+```
+
+### Classical → PQ Connection (Legacy Initiator)
+
+```
+Alice (Classical)                                       Bob (PQ)
+----------------                                        -------
+
+1. Cookie Request (no PQ marker)
+   [0x18][dht_pk][nonce][encrypted:{real_pk|number|0x00|padding}]
+   ────────────────────────────────────────────────────────────►
+
+2. Classical Cookie Response (Bob sees no marker)
+   [0x19][nonce][encrypted:{cookie|number}]
+   ◄────────────────────────────────────────────────────────────
+
+3-5. Classical handshake proceeds normally
+```
+
+## Simultaneous Hybrid Handshakes
+
+When both peers receive hybrid cookie responses simultaneously, both will attempt to send hybrid handshakes with their own ML-KEM encapsulations. This creates a conflict because each side generates a different shared secret.
+
+### Resolution: Public Key Comparison
+
+To ensure both sides use the same ML-KEM shared secret:
+
+1. If we receive a hybrid handshake **before** sending ours (status = COOKIE_REQUESTING):
+   - Use the peer's encapsulation (decapsulate their ciphertext)
+   - Send a **classical** handshake response (no new encapsulation)
+
+2. If we receive a hybrid handshake **after** sending ours (status = HANDSHAKE_SENT):
+   - Compare public keys lexicographically
+   - Lower public key "wins" - their encapsulation is used
+   - Higher public key uses the decapsulated secret from peer
 
 ```c
-/**
- * Send our PQ capabilities to a friend.
- */
-int toxext_pq_send_capability_announce(uint32_t friend_number) {
-    ToxExtPQ *pq = g_pq_ext;
-    if (pq == NULL) return -1;
-    
-    // Build packet
-    uint8_t packet[1265];
-    size_t offset = 0;
-    
-    packet[offset++] = TOXEXT_PQ_CAPABILITY_ANNOUNCE;
-    
-    // Version (big-endian)
-    packet[offset++] = (pq->version >> 8) & 0xFF;
-    packet[offset++] = pq->version & 0xFF;
-    
-    // Flags (reserved)
-    packet[offset++] = 0x00;
-    packet[offset++] = 0x00;
-    
-    // Supported KEMs
-    packet[offset++] = (pq->our_supported_kems >> 8) & 0xFF;
-    packet[offset++] = pq->our_supported_kems & 0xFF;
-    
-    // Supported signatures
-    packet[offset++] = (pq->our_supported_sigs >> 8) & 0xFF;
-    packet[offset++] = pq->our_supported_sigs & 0xFF;
-    
-    // Our ML-KEM public key
-    // (Get from identity - implementation detail)
-    Tox_Hybrid_Identity *identity = tox_get_hybrid_identity();
-    memcpy(packet + offset, identity->mlkem_public, TOX_MLKEM_PUBLICKEYBYTES);
-    offset += TOX_MLKEM_PUBLICKEYBYTES;
-    
-    // Timestamp
-    uint64_t timestamp = time(NULL);
-    for (int i = 7; i >= 0; i--) {
-        packet[offset++] = (timestamp >> (i * 8)) & 0xFF;
-    }
-    
-    // Sign the packet (excluding signature field)
-    uint8_t signature[64];
-    // ... signing code using Ed25519 ...
-    memcpy(packet + offset, signature, 64);
-    offset += 64;
-    
-    // Send via ToxExt
-    return toxext_send(friend_number, PQ_EXTENSION_UUID, packet, offset);
-}
-
-/**
- * Handle received capability announcement.
- */
-static void toxext_pq_handle_announce(
-    ToxExtPQ *pq,
-    uint32_t friend_number,
-    const uint8_t *data,
-    size_t length
-) {
-    if (length < 1264) {  // Minimum valid size
-        return;
-    }
-    
-    size_t offset = 0;
-    
-    // Parse version
-    uint16_t version = (data[offset] << 8) | data[offset + 1];
-    offset += 2;
-    
-    // Skip flags
-    offset += 2;
-    
-    // Parse supported KEMs
-    uint16_t peer_kems = (data[offset] << 8) | data[offset + 1];
-    offset += 2;
-    
-    // Parse supported sigs
-    uint16_t peer_sigs = (data[offset] << 8) | data[offset + 1];
-    offset += 2;
-    
-    // Extract peer's ML-KEM public key
-    const uint8_t *peer_mlkem_pubkey = data + offset;
-    offset += TOX_MLKEM_PUBLICKEYBYTES;
-    
-    // Parse timestamp
-    uint64_t timestamp = 0;
-    for (int i = 0; i < 8; i++) {
-        timestamp = (timestamp << 8) | data[offset++];
-    }
-    
-    // Verify signature
-    const uint8_t *signature = data + offset;
-    // ... signature verification ...
-    
-    // Store peer capabilities
-    pq->peer_supported_kems = peer_kems;
-    pq->peer_supported_sigs = peer_sigs;
-    
-    // Store peer's ML-KEM public key
-    // (Store in friend's contact record)
-    tox_friend_set_mlkem_pubkey(friend_number, peer_mlkem_pubkey);
-    
-    // Compute negotiated capabilities
-    pq->negotiated_kem = pq->our_supported_kems & peer_kems;
-    pq->negotiated_sig = pq->our_supported_sigs & peer_sigs;
-    
-    if (pq->negotiated_kem != 0) {
-        // We have common KEM support!
-        pq->peer_pq_capable = true;
-        toxext_pq_send_capability_ack(friend_number, pq->negotiated_kem, pq->negotiated_sig);
-    } else {
-        // No common algorithms
-        pq->peer_pq_capable = false;
-        toxext_pq_send_capability_reject(friend_number, 0x0001);  // No common algorithms
-    }
-    
-    pq->negotiation_complete = true;
-    
-    if (pq->on_negotiation_complete) {
-        pq->on_negotiation_complete(friend_number, pq->peer_pq_capable);
-    }
+/* In handle_packet_crypto_hs() */
+if (conn->status == CRYPTO_CONN_COOKIE_REQUESTING) {
+    /* We're the responder - use peer's encapsulation */
+    use_peer_encapsulation = true;
+} else if (conn->status == CRYPTO_CONN_HANDSHAKE_SENT) {
+    /* Both sent - lower public key wins */
+    int cmp = memcmp(c->self_public_key, peer_real_pk, CRYPTO_PUBLIC_KEY_SIZE);
+    use_peer_encapsulation = (cmp > 0);
 }
 ```
 
-### Integration with Handshake
+## Implementation Details
+
+### Key Files
+
+- `toxcore/net_crypto.c`: Core handshake logic, PQ marker detection
+- `toxcore/crypto_core_pq.c`: ML-KEM wrappers, hybrid KDF
+- `toxcore/friend_connection.c`: Connection setup with PQ capability tracking
+
+### Constants
 
 ```c
-/**
- * Called before initiating handshake with friend.
- * Determines whether to use hybrid or classical handshake.
- */
-bool toxext_pq_should_use_hybrid(uint32_t friend_number) {
-    ToxExtPQ *pq = g_pq_ext;
-    if (pq == NULL) return false;
-    
-    // Check if we've completed negotiation with this friend
-    if (!pq->negotiation_complete) {
-        return false;  // Not yet negotiated, use classical
-    }
-    
-    return pq->peer_pq_capable && (pq->negotiated_kem & TOXEXT_PQ_KEM_MLKEM768);
-}
+/* net_crypto.c */
+#define PQ_CAPABILITY_MARKER     0x02
+#define PQ_CAPABILITY_OFFSET     (CRYPTO_PUBLIC_KEY_SIZE)  /* 32 */
 
-/**
- * Get peer's ML-KEM public key for hybrid handshake.
- */
-int toxext_pq_get_peer_mlkem_pubkey(
-    uint32_t friend_number,
-    uint8_t pubkey[TOX_MLKEM_PUBLICKEYBYTES]
-) {
-    return tox_friend_get_mlkem_pubkey(friend_number, pubkey);
-}
+#define TOX_CRYPTO_VERSION_HYBRID 0x02
+
+/* Packet sizes */
+#define HYBRID_COOKIE_RESPONSE_LENGTH  1346  /* Includes ML-KEM public key */
+#define HYBRID_HANDSHAKE_PACKET_LENGTH 1474  /* Includes ML-KEM ciphertext */
 ```
 
-## State Machine
-
-### Per-Friend PQ State
-
-```
-                    ┌─────────────────────┐
-                    │      UNKNOWN        │
-                    │ (Initial state)     │
-                    └──────────┬──────────┘
-                               │
-                    Friend connection established
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │    NEGOTIATING      │
-                    │ Exchanging caps     │
-                    └──────────┬──────────┘
-                               │
-              ┌────────────────┼────────────────┐
-              │                │                │
-              ▼                ▼                ▼
-    ┌─────────────────┐ ┌─────────────┐ ┌─────────────────┐
-    │  PQ_CAPABLE     │ │ CLASSICAL   │ │     ERROR       │
-    │ Hybrid enabled  │ │ No PQ ext   │ │ Negotiation     │
-    │                 │ │ or no match │ │ failed          │
-    └────────┬────────┘ └─────────────┘ └─────────────────┘
-             │
-             │ Handshake with hybrid
-             ▼
-    ┌─────────────────┐
-    │  PQ_ACTIVE      │
-    │ Session using   │
-    │ hybrid crypto   │
-    └─────────────────┘
-```
-
-### State Transitions
+### Connection State
 
 ```c
-typedef enum {
-    PQ_STATE_UNKNOWN,
-    PQ_STATE_NEGOTIATING,
-    PQ_STATE_PQ_CAPABLE,
-    PQ_STATE_CLASSICAL,
-    PQ_STATE_PQ_ACTIVE,
-    PQ_STATE_ERROR
-} ToxExtPQState;
+typedef struct Crypto_Connection {
+    /* ... existing fields ... */
 
-// State stored per-friend
-typedef struct FriendPQState {
-    ToxExtPQState state;
-    uint16_t negotiated_kem;
-    uint8_t mlkem_pubkey[TOX_MLKEM_PUBLICKEYBYTES];
-    uint64_t last_update;
-    uint8_t capability_signature[64];  // For downgrade detection
-} FriendPQState;
+    /* PQ capability fields */
+    bool pq_enabled;              /* Our PQ capability */
+    bool peer_pq_capable;         /* Peer's PQ capability */
+    bool session_is_hybrid;       /* Current session type */
+
+    /* ML-KEM key material */
+    uint8_t peer_mlkem_public[TOX_MLKEM768_PUBLICKEYBYTES];
+    uint8_t mlkem_ciphertext[TOX_MLKEM768_CIPHERTEXTBYTES];
+    uint8_t mlkem_shared[TOX_MLKEM768_SHAREDSECRETBYTES];
+} Crypto_Connection;
 ```
 
-## Downgrade Attack Prevention
+## Security Considerations
 
-### Attack Scenario
+### Downgrade Attack Prevention
 
-1. Alice and Bob both support PQ
-2. Mallory (MITM) intercepts capability announcements
-3. Mallory tells each side the other only supports classical
-4. Sessions established with classical-only (quantum vulnerable)
+The current implementation provides **implicit** downgrade protection:
 
-### Defense: Capability Commitment
+1. PQ-capable peers will always set the PQ marker
+2. If a peer responds with hybrid cookie response, we know they're PQ-capable
+3. MITM cannot forge hybrid responses without the responder's keys
 
-Each peer signs their capabilities with their long-term key:
+**Limitation**: No explicit capability commitments. A sophisticated MITM could potentially block hybrid responses and force classical fallback. Future work may add signed capability announcements.
 
-```c
-/**
- * Create signed capability commitment.
- * This prevents MITM from forging capability downgrades.
- */
-int toxext_pq_create_commitment(
-    uint8_t commitment[128],  // Output
-    const Tox_Hybrid_Identity *identity,
-    uint16_t supported_kems,
-    uint16_t supported_sigs,
-    uint64_t timestamp
-) {
-    // Build commitment data
-    uint8_t data[64];
-    size_t offset = 0;
-    
-    // Tox public key (binds to identity)
-    memcpy(data + offset, identity->x25519_public, 32);
-    offset += 32;
-    
-    // Supported algorithms
-    data[offset++] = (supported_kems >> 8) & 0xFF;
-    data[offset++] = supported_kems & 0xFF;
-    data[offset++] = (supported_sigs >> 8) & 0xFF;
-    data[offset++] = supported_sigs & 0xFF;
-    
-    // Timestamp (monotonically increasing)
-    for (int i = 7; i >= 0; i--) {
-        data[offset++] = (timestamp >> (i * 8)) & 0xFF;
-    }
-    
-    // Padding
-    memset(data + offset, 0, 64 - offset);
-    
-    // Sign with Ed25519 (or X25519-derived signing key)
-    // ... signature generation ...
-    
-    // Output: data || signature
-    memcpy(commitment, data, 64);
-    memcpy(commitment + 64, signature, 64);
-    
-    return 0;
-}
+### Forward Secrecy
 
-/**
- * Verify peer's capability commitment.
- * Alert user if capabilities decreased (potential attack).
- */
-int toxext_pq_verify_commitment(
-    uint32_t friend_number,
-    const uint8_t commitment[128],
-    const uint8_t peer_pubkey[32]
-) {
-    // Verify signature
-    // ... signature verification ...
-    
-    // Check timestamp is newer than stored
-    uint64_t new_timestamp = /* parse from commitment */;
-    uint64_t stored_timestamp = tox_friend_get_pq_timestamp(friend_number);
-    
-    if (new_timestamp <= stored_timestamp) {
-        // Replay attack or stale commitment
-        return -1;
-    }
-    
-    // Check for capability downgrade
-    uint16_t new_kems = /* parse from commitment */;
-    uint16_t stored_kems = tox_friend_get_pq_kems(friend_number);
-    
-    if (stored_kems != 0 && new_kems == 0) {
-        // Peer previously supported PQ, now claims classical-only
-        // This could be a downgrade attack!
-        // Alert the user
-        tox_friend_pq_downgrade_warning(friend_number);
-        return -2;
-    }
-    
-    // Store new commitment
-    tox_friend_set_pq_commitment(friend_number, commitment);
-    
-    return 0;
-}
-```
+- Each session uses fresh ephemeral keys (both X25519 and ML-KEM)
+- Compromise of long-term keys doesn't reveal past session keys
+- ML-KEM ciphertext is unique per session (randomized encapsulation)
 
-### User Warning on Downgrade
+### Quantum Resistance
 
-When a peer's capabilities decrease:
+- If X25519 is broken by quantum computers, ML-KEM provides protection
+- If ML-KEM is broken (e.g., new cryptanalysis), X25519 still provides classical security
+- Symmetric encryption (XSalsa20-Poly1305) uses 256-bit keys, already quantum-resistant
 
-```kotlin
-// In aTox UI
-fun onPQDowngradeWarning(friendNumber: Int) {
-    val friend = friendRepository.get(friendNumber)
-    
-    AlertDialog.Builder(context)
-        .setTitle("Security Warning")
-        .setMessage(
-            "${friend.name}'s connection security has decreased. " +
-            "This could indicate a network attack. " +
-            "Do you want to continue with reduced security?"
-        )
-        .setPositiveButton("Continue (Reduced Security)") { _, _ ->
-            // User accepts downgrade
-            toxService.acceptPQDowngrade(friendNumber)
-        }
-        .setNegativeButton("Block Connection") { _, _ ->
-            // User rejects, connection blocked
-            toxService.blockConnection(friendNumber)
-        }
-        .show()
-}
-```
+## Testing
 
-## Testing the Extension
-
-### Unit Tests
-
-```c
-// test_toxext_pq.c
-
-void test_capability_announce_roundtrip() {
-    // Create announcement
-    uint8_t packet[1265];
-    int len = toxext_pq_create_announce_packet(packet);
-    assert(len == 1265);
-    
-    // Parse it back
-    uint16_t kems, sigs;
-    uint8_t mlkem_pubkey[1184];
-    int result = toxext_pq_parse_announce_packet(packet, len, &kems, &sigs, mlkem_pubkey);
-    assert(result == 0);
-    assert(kems == TOXEXT_PQ_KEM_MLKEM768);
-}
-
-void test_negotiation_both_support_pq() {
-    // Simulate two clients
-    ToxExtPQ *alice = toxext_pq_create();
-    ToxExtPQ *bob = toxext_pq_create();
-    
-    // Both support ML-KEM-768
-    alice->our_supported_kems = TOXEXT_PQ_KEM_MLKEM768;
-    bob->our_supported_kems = TOXEXT_PQ_KEM_MLKEM768;
-    
-    // Exchange capabilities
-    // ... simulation ...
-    
-    assert(alice->peer_pq_capable == true);
-    assert(bob->peer_pq_capable == true);
-    assert(alice->negotiated_kem == TOXEXT_PQ_KEM_MLKEM768);
-}
-
-void test_negotiation_fallback_to_classical() {
-    ToxExtPQ *alice = toxext_pq_create();
-    // Bob doesn't have PQ extension at all
-    
-    // Alice sends announce, no response
-    // ... simulation ...
-    
-    assert(alice->peer_pq_capable == false);
-    // Session proceeds with classical
-}
-```
-
-### Integration Tests
+### Verify PQ Negotiation
 
 ```bash
-# Test script for two aqTox-PQ clients
+# Run friend connection test - should show hybrid handshake
+./auto_tests/auto_friend_connection_test
 
-# Start first client
-./atox-pq --profile alice --port 33445 &
-ALICE_PID=$!
-
-# Start second client  
-./atox-pq --profile bob --port 33446 &
-BOB_PID=$!
-
-# Wait for bootstrap
-sleep 10
-
-# Add friends
-# ... test automation ...
-
-# Verify PQ negotiation succeeded
-# Check logs for "PQ negotiation complete: hybrid enabled"
-
-# Verify session uses hybrid crypto
-# Check logs for "Session established with hybrid key exchange"
+# Expected flow in debug output (when PQ_DEBUG=1):
+# [PQ] create_cookie_request: Setting PQ capability marker
+# [PQ] udp_handle_cookie_request: Detected PQ capability marker, sending hybrid response
+# [PQ] handle_packet_cookie_response: Detected hybrid cookie response
+# [PQ] handle_packet_cookie_response: Creating hybrid handshake
 ```
+
+### Verify Backwards Compatibility
+
+To test classical fallback, disable PQ on one side:
+
+```c
+/* Temporarily disable PQ for testing */
+c->pq_enabled = false;
+```
+
+The connection should establish using classical-only cryptography.
+
+## Future Enhancements
+
+1. **Explicit Capability Commitments**: Sign capabilities with long-term key for downgrade protection
+2. **Algorithm Negotiation**: Support multiple KEMs (ML-KEM-1024, etc.) with bitmask selection
+3. **Key Rotation**: Periodic ML-KEM key updates during long sessions
+4. **API Exposure**: `tox_friend_get_connection_security()` to query session type

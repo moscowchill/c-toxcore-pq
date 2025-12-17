@@ -159,4 +159,18 @@ Friend_Conn *_Nullable get_conn(const Friend_Connections *_Nonnull fr_c, int fri
 int friend_conn_get_onion_friendnum(const Friend_Conn *_Nonnull fc);
 const IP_Port *_Nullable friend_conn_get_dht_ip_port(const Friend_Conn *_Nonnull fc);
 
+/** @brief Set post-quantum capability info for a friend connection.
+ *
+ * Call this when you know the peer is PQ-capable (e.g., from their hybrid public key).
+ *
+ * @param fr_c Friend connections context
+ * @param friendcon_id Friend connection ID
+ * @param peer_mlkem_public Peer's ML-KEM-768 public key (1184 bytes)
+ *
+ * @retval -1 on failure
+ * @retval 0 on success
+ */
+int friend_connection_set_pq_capability(Friend_Connections *_Nonnull fr_c, int friendcon_id,
+                                         const uint8_t *_Nonnull peer_mlkem_public);
+
 #endif /* C_TOXCORE_TOXCORE_FRIEND_CONNECTION_H */

@@ -16,6 +16,7 @@
 #include "attributes.h"
 #include "ccompat.h"
 #include "crypto_core.h"
+#include "crypto_core_pq.h"
 #include "logger.h"
 #include "mem.h"
 #include "mono_time.h"
@@ -63,6 +64,10 @@ struct Friend_Conn {
     uint32_t tcp_relay_share_index;
 
     bool hosting_tcp_relay;
+
+    /* Post-quantum hybrid fields */
+    bool peer_pq_capable;  /* True if peer's identity key is hybrid format */
+    uint8_t peer_mlkem_public[TOX_MLKEM768_PUBLICKEYBYTES];  /* Peer's ML-KEM public key */
 };
 
 static const Friend_Conn empty_friend_conn = {0};
@@ -607,7 +612,9 @@ static int friend_new_connection(Friend_Connections *fr_c, int friendcon_id)
         return -1;
     }
 
-    const int id = new_crypto_connection(fr_c->net_crypto, friend_con->real_public_key, friend_con->dht_temp_pk);
+    /* Pass peer ML-KEM public key if they're PQ-capable */
+    const uint8_t *peer_mlkem = friend_con->peer_pq_capable ? friend_con->peer_mlkem_public : NULL;
+    const int id = new_crypto_connection_pq(fr_c->net_crypto, friend_con->real_public_key, friend_con->dht_temp_pk, peer_mlkem);
 
     if (id == -1) {
         return -1;
@@ -892,6 +899,25 @@ int send_friend_request_packet(Friend_Connections *fr_c, int friendcon_id, uint3
     }
 
     return num;
+}
+
+int friend_connection_set_pq_capability(Friend_Connections *fr_c, int friendcon_id,
+                                         const uint8_t *peer_mlkem_public)
+{
+    Friend_Conn *const friend_con = get_conn(fr_c, friendcon_id);
+
+    if (friend_con == nullptr) {
+        return -1;
+    }
+
+    if (peer_mlkem_public == NULL) {
+        return -1;
+    }
+
+    friend_con->peer_pq_capable = true;
+    memcpy(friend_con->peer_mlkem_public, peer_mlkem_public, TOX_MLKEM768_PUBLICKEYBYTES);
+
+    return 0;
 }
 
 /** Create new friend_connections instance. */
