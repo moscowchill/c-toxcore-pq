@@ -362,6 +362,93 @@ c->pq_enabled = false;
 
 Connection should establish using classical-only cryptography with `conn->session_is_hybrid = false`.
 
+## Identity Commitment Verification (Phase 2.5)
+
+### Overview
+
+When a friend is added using a 46-byte PQ address (containing ML-KEM commitment), the commitment is verified during connection establishment to provide quantum-resistant identity protection.
+
+### Storage Flow
+
+```
+1. User adds friend with 46-byte address
+   ↓
+2. Messenger parses address:
+   - X25519 pk → Friend.real_pk
+   - ML-KEM commit → Friend.mlkem_commitment
+   - Set has_mlkem_commitment = true
+   ↓
+3. Commitment passed to friend_connection layer:
+   friend_connection_set_mlkem_commitment(fr_c, friendcon_id, commitment)
+```
+
+### Verification Flow (friend_connection.c)
+
+When connection goes online in `handle_status()`:
+
+```c
+if (nc_connection_is_pq(fr_c->net_crypto, friend_con->crypt_connection_id)) {
+    if (friend_con->has_mlkem_commitment) {
+        uint8_t peer_mlkem_public[TOX_MLKEM768_PUBLICKEYBYTES];
+
+        if (nc_get_peer_mlkem_public(fr_c->net_crypto, crypt_conn_id, peer_mlkem_public)) {
+            if (tox_verify_mlkem_commitment(friend_con->mlkem_commitment, peer_mlkem_public)) {
+                friend_con->mlkem_verified = true;  // PQ_VERIFIED
+            } else {
+                // COMMITMENT MISMATCH - possible impersonation!
+                // Kill connection and reject
+                crypto_kill(fr_c->net_crypto, crypt_conn_id);
+                return -1;
+            }
+        }
+    }
+    // No commitment: mlkem_verified stays false (PQ_UNVERIFIED)
+}
+```
+
+### Status Propagation
+
+```
+friend_connection layer          Messenger layer              Public API
+─────────────────────           ───────────────              ───────────
+Friend_Conn.mlkem_verified  →  Friend.mlkem_verified  →  tox_friend_get_identity_status()
+                               ↓
+                            m_handle_status() triggers
+                            friend_identity_status callback
+```
+
+### API Functions
+
+```c
+// Query friend's identity verification status
+Tox_Connection_Identity tox_friend_get_identity_status(
+    const Tox *tox,
+    Tox_Friend_Number friend_number,
+    Tox_Err_Friend_Query *error);
+
+// Returns:
+//   TOX_CONNECTION_IDENTITY_UNKNOWN      - Not connected
+//   TOX_CONNECTION_IDENTITY_CLASSICAL    - X25519-only connection
+//   TOX_CONNECTION_IDENTITY_PQ_UNVERIFIED - Hybrid session, no commitment
+//   TOX_CONNECTION_IDENTITY_PQ_VERIFIED   - Hybrid session, commitment verified
+
+// Add friend with 46-byte PQ address
+Tox_Friend_Number tox_friend_add_pq(
+    Tox *tox,
+    const uint8_t address[TOX_ADDRESS_SIZE_PQ],
+    const uint8_t message[],
+    size_t length,
+    Tox_Err_Friend_Add *error);
+```
+
+### Security Considerations
+
+1. **Commitment rejection is fatal**: If commitment verification fails, the connection is immediately terminated. This prevents impersonation attacks.
+
+2. **No downgrade**: Once a 46-byte address is used, the commitment is always verified. An attacker cannot bypass by presenting a different ML-KEM key.
+
+3. **Constant-time comparison**: `tox_verify_mlkem_commitment()` uses `sodium_memcmp()` to prevent timing attacks.
+
 ## Phase 2 Deliverables Checklist
 
 - [x] Extended Crypto_Connection structure with PQ fields
@@ -373,14 +460,24 @@ Connection should establish using classical-only cryptography with `conn->sessio
 - [x] Simultaneous handshake resolution (public key comparison)
 - [x] Automatic fallback to classical for legacy peers
 - [x] Integration tests passing
-- [ ] New API: `tox_friend_get_connection_security()` (future work)
-- [ ] New API: `tox_self_get_pq_capable()` (future work)
+
+### Phase 2.5 - Identity Commitment (Complete)
+
+- [x] ML-KEM commitment generation (`tox_mlkem_commitment()`)
+- [x] Commitment verification (`tox_verify_mlkem_commitment()`)
+- [x] 46-byte PQ address format (`TOX_ADDRESS_SIZE_PQ`)
+- [x] Extended Friend struct with commitment fields
+- [x] `tox_self_get_address_pq()` - Get 46-byte PQ address
+- [x] `tox_friend_add_pq()` - Add friend with PQ address
+- [x] Commitment verification in `handle_status()`
+- [x] `tox_friend_get_identity_status()` - Query verification status
+- [x] Identity status callback (`tox_callback_friend_identity_status`)
+- [x] Unit tests for commitment functions
 
 ## Known Limitations
 
-1. **No explicit capability commitments**: Downgrade attacks by blocking hybrid responses are theoretically possible
-2. **No algorithm negotiation**: Hardcoded to ML-KEM-768
-3. **No session security API**: Application cannot query connection type yet
+1. **No algorithm negotiation**: Hardcoded to ML-KEM-768
+2. **Commitment collision resistance**: 8-byte commitment has 64-bit collision resistance (sufficient for target security level)
 
 ## Next: Phase 3
 

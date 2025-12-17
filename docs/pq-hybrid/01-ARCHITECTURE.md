@@ -502,13 +502,90 @@ cleanup:
 | `ui/contactlist/ContactListFragment.kt` | Per-contact security badges | Phase 3 |
 | `ui/settings/SettingsFragment.kt` | PQ policy preferences | Phase 3 |
 
+## Quantum-Resistant Identity
+
+### The Identity Problem
+
+Current Tox IDs only contain X25519 public keys, which are vulnerable to quantum attack. Even with hybrid session keys (ML-KEM + X25519), a quantum attacker could:
+
+1. Derive the private key from a Tox ID's X25519 public key
+2. Impersonate the user by establishing sessions with their identity
+
+Session security is not enough - we need quantum-resistant identity verification.
+
+### 46-Byte PQ Tox Address
+
+The solution is an extended Tox address that includes an ML-KEM commitment:
+
+```
+Classical (38 bytes): [X25519_pk:32][nospam:4][checksum:2]
+PQ (46 bytes):        [X25519_pk:32][MLKEM_commit:8][nospam:4][checksum:2]
+```
+
+Where:
+- `MLKEM_commit = SHA256(ML-KEM_public_key)[0:8]`
+- Checksum covers first 44 bytes for PQ address
+
+### Commitment Verification Flow
+
+```
+┌─────────────────┐                    ┌─────────────────┐
+│   Alice (PQ)    │                    │    Bob (PQ)     │
+└────────┬────────┘                    └────────┬────────┘
+         │                                      │
+         │ 1. Alice adds Bob with 46-byte address
+         │    Stores MLKEM_commit for Bob
+         │                                      │
+         │ 2. Cookie Request (version=0x02)     │
+         ├─────────────────────────────────────>│
+         │                                      │
+         │ 3. Cookie Response + ML-KEM pubkey   │
+         │<─────────────────────────────────────┤
+         │                                      │
+         │ 4. Alice verifies:                   │
+         │    SHA256(Bob_mlkem_pk)[0:8] == stored_commitment?
+         │    ✓ Match: Connection proceeds      │
+         │    ✗ Mismatch: Reject (impersonation!)
+         │                                      │
+         │ 5. Hybrid Handshake (ML-KEM + X25519)│
+         │<────────────────────────────────────>│
+         │                                      │
+         │ 6. Connection established:           │
+         │    identity_status = PQ_VERIFIED     │
+```
+
+### Identity Status Levels
+
+| Status | Meaning | UI Indicator |
+|--------|---------|--------------|
+| `CLASSICAL` | X25519-only connection | ⚠️ "Classical" |
+| `PQ_UNVERIFIED` | Hybrid session, 38-byte address (no commitment) | "PQ" |
+| `PQ_VERIFIED` | Hybrid session, commitment verified | ✅ "PQ-Verified" |
+
+### Security Properties
+
+- **PQ_VERIFIED**: Full quantum-resistant security
+  - Session keys protected by ML-KEM + X25519
+  - Identity bound to ML-KEM public key
+  - Quantum attacker cannot impersonate
+
+- **PQ_UNVERIFIED**: Partial protection
+  - Session keys quantum-resistant
+  - Identity NOT quantum-protected (38-byte address used)
+  - Quantum attacker could theoretically impersonate during initial add
+
+- **CLASSICAL**: No quantum protection
+  - Legacy interoperability mode
+  - Vulnerable to quantum attacks on both session and identity
+
 ## Backwards Compatibility Matrix
 
-| Client A | Client B | Key Exchange | Session Security |
-|----------|----------|--------------|------------------|
-| aqTox-PQ | aqTox-PQ | Hybrid (X25519 + ML-KEM) | Quantum-resistant |
-| aqTox-PQ | Legacy Tox | X25519 only (fallback) | Classical |
-| Legacy Tox | aqTox-PQ | X25519 only | Classical |
-| Legacy Tox | Legacy Tox | X25519 only | Classical |
+| Client A | Client B | Key Exchange | Session Security | Identity Security |
+|----------|----------|--------------|------------------|-------------------|
+| aqTox-PQ (46-byte) | aqTox-PQ | Hybrid | Quantum-resistant | PQ_VERIFIED |
+| aqTox-PQ (38-byte) | aqTox-PQ | Hybrid | Quantum-resistant | PQ_UNVERIFIED |
+| aqTox-PQ | Legacy Tox | X25519 only | Classical | CLASSICAL |
+| Legacy Tox | aqTox-PQ | X25519 only | Classical | CLASSICAL |
+| Legacy Tox | Legacy Tox | X25519 only | Classical | CLASSICAL |
 
 The hybrid client initiates capability discovery and gracefully falls back when the peer doesn't support PQ extensions.
