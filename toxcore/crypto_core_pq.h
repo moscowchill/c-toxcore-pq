@@ -17,6 +17,35 @@ extern "C" {
 #endif
 
 /*******************************************************************************
+ * Forward declarations for libsodium ML-KEM and HKDF functions
+ *
+ * These functions are available in libsodium 1.0.20+ (master branch).
+ * We declare them explicitly to avoid implicit declaration warnings when
+ * building with older libsodium headers that don't expose these symbols yet.
+ ******************************************************************************/
+
+/* ML-KEM-768 (NIST FIPS 203) */
+int crypto_kem_mlkem768_keypair(unsigned char *pk, unsigned char *sk);
+int crypto_kem_mlkem768_seed_keypair(unsigned char *pk, unsigned char *sk,
+                                      const unsigned char *seed);
+int crypto_kem_mlkem768_enc(unsigned char *ct, unsigned char *ss,
+                            const unsigned char *pk);
+int crypto_kem_mlkem768_dec(unsigned char *ss, const unsigned char *ct,
+                            const unsigned char *sk);
+size_t crypto_kem_mlkem768_publickeybytes(void);
+size_t crypto_kem_mlkem768_secretkeybytes(void);
+size_t crypto_kem_mlkem768_ciphertextbytes(void);
+size_t crypto_kem_mlkem768_bytes(void);
+
+/* HKDF-SHA512 (RFC 5869) */
+int crypto_kdf_hkdf_sha512_extract(unsigned char *prk,
+                                   const unsigned char *salt, size_t salt_len,
+                                   const unsigned char *ikm, size_t ikm_len);
+int crypto_kdf_hkdf_sha512_expand(unsigned char *out, size_t out_len,
+                                  const char *ctx, size_t ctx_len,
+                                  const unsigned char *prk);
+
+/*******************************************************************************
  * Constants
  ******************************************************************************/
 
